@@ -1,7 +1,7 @@
 import io
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import BinaryIO, MutableMapping
 
 import numpy as np
@@ -17,6 +17,7 @@ class EtabsWorkbook:
     tables: dict[str, pd.DataFrame]
     pdelta_source_issue: str | None = None
     missing_optional_sheets: tuple[str, ...] = ()
+    optional_table_issues: dict[str, str] = field(default_factory=dict)
 
 
 REQUIRED_SHEETS = {
@@ -54,6 +55,11 @@ OPTIONAL_TABLES = {
     "joint_displacements": {
         "label": "Joint Displacements",
         "aliases": ("Joint Displacements",),
+        "pdelta_source": False,
+    },
+    "diaphragm_drifts": {
+        "label": "Diaphragm Max Over Avg Drifts",
+        "aliases": ("Diaphragm Max Over Avg Drifts",),
         "pdelta_source": False,
     },
 }
@@ -100,6 +106,7 @@ COLUMNS = {
         "drift": ("Drift",),
     },
     "modal_mass": {
+        "case": ("Case",),
         "period": ("Period",),
         "ux": ("UX",),
         "uy": ("UY",),
@@ -134,6 +141,14 @@ COLUMNS = {
         "ux": ("UX",),
         "uy": ("UY",),
         "z": ("Z",),
+    },
+    "diaphragm_drifts": {
+        "story": ("Story",),
+        "output_case": ("Output Case", "Case"),
+        "item": ("Item",),
+        "max_drift": ("Max Drift",),
+        "avg_drift": ("Avg Drift",),
+        "ratio": ("Ratio",),
     },
 }
 
@@ -277,8 +292,9 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
         )
 
     tables = {}
+    optional_issues = {}
     missing_optional = missing_optional_sheets(sheet_names)
-    optional_issues = [
+    pdelta_issues = [
         f"الورقة الاختيارية {label} غير موجودة"
         for key, label, _aliases in missing_optional
         if OPTIONAL_TABLES[key]["pdelta_source"]
@@ -296,22 +312,25 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
         except WorkbookValidationError as exc:
             if key in REQUIRED_SHEETS:
                 raise
+            optional_issues[key] = str(exc)
             if OPTIONAL_TABLES[key]["pdelta_source"]:
-                optional_issues.append(f"{sheet_name}: {exc}")
+                pdelta_issues.append(f"{sheet_name}: {exc}")
         except Exception as exc:
             if key in REQUIRED_SHEETS:
                 raise WorkbookValidationError(
                     f"تعذر قراءة ورقة {sheet_name}: {exc}"
                 ) from exc
+            optional_issues[key] = str(exc)
             if OPTIONAL_TABLES[key]["pdelta_source"]:
-                optional_issues.append(f"تعذر قراءة ورقة {sheet_name}: {exc}")
+                pdelta_issues.append(f"تعذر قراءة ورقة {sheet_name}: {exc}")
 
     return EtabsWorkbook(
         tables=tables,
-        pdelta_source_issue="؛ ".join(optional_issues) if optional_issues else None,
+        pdelta_source_issue="؛ ".join(pdelta_issues) if pdelta_issues else None,
         missing_optional_sheets=tuple(
             label for _key, label, _aliases in missing_optional
         ),
+        optional_table_issues=optional_issues,
     )
 
 
@@ -480,30 +499,277 @@ def calculate_story_drifts(
 
 def calculate_modal_mass(table: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     result = []
-    for direction, column in (("X", "sumux"), ("Y", "sumuy")):
-        values = pd.to_numeric(table[column], errors="coerce").dropna()
-        if values.empty:
+    if "case" in table:
+        cases = table["case"].fillna("").astype(str).str.strip()
+    else:
+        cases = pd.Series("Unspecified", index=table.index)
+    for case_name, case_rows in table.groupby(cases, sort=False, dropna=False):
+        for direction, column in (("X", "sumux"), ("Y", "sumuy")):
+            values = pd.to_numeric(case_rows[column], errors="coerce").dropna()
+            maximum_percent = np.nan
+            check = "NOT_EVALUATED"
+            if not values.empty:
+                maximum = float(values.max())
+                if 0 <= maximum <= 1:
+                    maximum_percent = maximum * 100
+                    check = "PASS" if maximum_percent >= 90 else "FAIL"
+                elif 1 < maximum <= 100:
+                    maximum_percent = maximum
+                    check = "PASS" if maximum_percent >= 90 else "FAIL"
             result.append(
-                {"direction": direction, "maximum_percent": np.nan, "check": "NOT_EVALUATED"}
+                {
+                    "case": case_name or "Unspecified",
+                    "direction": direction,
+                    "maximum_percent": maximum_percent,
+                    "check": check,
+                }
             )
-            continue
-        maximum = float(values.max())
-        maximum_percent = maximum if maximum > 1 else maximum * 100
-        result.append(
-            {
-                "direction": direction,
-                "maximum_percent": maximum_percent,
-                "check": "PASS" if maximum_percent >= 90 else "FAIL",
-            }
-        )
     result_frame = pd.DataFrame(result)
-    if (result_frame["check"] == "NOT_EVALUATED").any():
-        status = "INCOMPLETE"
+    if result_frame.empty or (result_frame["check"] == "NOT_EVALUATED").any():
+        status = "INCOMPLETE" if not result_frame.empty else "NOT_EVALUATED"
     elif (result_frame["check"] == "FAIL").any():
         status = "FAIL"
     else:
         status = "PASS"
     return result_frame, status
+
+
+IRAQI_2019_DRIFT_LIMITS = {
+    "I": 0.020,
+    "II": 0.020,
+    "III": 0.015,
+    "IV": 0.010,
+}
+
+
+def calculate_iraqi_2019_story_drifts(
+    table: pd.DataFrame,
+    risk_category: str | None,
+    applicability_confirmed: bool,
+    cd: float,
+    ie: float,
+) -> tuple[pd.DataFrame, str]:
+    cd = _positive_number(cd, "Cd")
+    ie = _positive_number(ie, "Ie")
+    category = str(risk_category or "").strip().upper()
+    limit = IRAQI_2019_DRIFT_LIMITS.get(category)
+    cases = table["output_case"].astype(str)
+    lateral = table[cases.str.contains(r"EQ|RS|SPEC", case=False, na=False)].copy()
+    result = lateral[["story", "output_case", "direction"]].copy()
+    result["elastic_drift_ratio"] = pd.to_numeric(
+        lateral["drift"], errors="coerce"
+    ).abs()
+    result["cd_ie_factor"] = cd / ie
+    result["design_drift_ratio"] = np.nan
+    result["limit_ratio"] = limit if applicability_confirmed else np.nan
+    result["check"] = "NOT_EVALUATED"
+
+    if limit is None:
+        result["reason"] = "Risk Category I–IV is not selected."
+    elif not applicability_confirmed:
+        result["reason"] = (
+            "Applicability of the 'other concrete structures' limit is unconfirmed."
+        )
+    else:
+        result["design_drift_ratio"] = (
+            result["elastic_drift_ratio"] * result["cd_ie_factor"]
+        )
+        valid = (
+            result["elastic_drift_ratio"].notna()
+            & np.isfinite(result["design_drift_ratio"])
+        )
+        result["check"] = np.where(
+            valid,
+            np.where(result["design_drift_ratio"] <= limit, "PASS", "FAIL"),
+            "NOT_EVALUATED",
+        )
+        result["reason"] = np.where(valid, "", "The ETABS drift value is not numeric.")
+
+    if result.empty:
+        status = "NOT_EVALUATED"
+    elif (result["check"] == "FAIL").any():
+        status = "FAIL"
+    elif (result["check"] == "NOT_EVALUATED").any():
+        status = "INCOMPLETE" if limit is not None and applicability_confirmed else "NOT_EVALUATED"
+    else:
+        status = "PASS"
+    return result.reset_index(drop=True), status
+
+
+def calculate_iraqi_2019_torsion_eccentricities(
+    table: pd.DataFrame,
+    dx: float,
+    dy: float,
+    accidental_percent: float | None,
+) -> tuple[pd.DataFrame, str]:
+    dx = _positive_number(dx, "Dx")
+    dy = _positive_number(dy, "Dy")
+    if accidental_percent is not None:
+        accidental_percent = float(accidental_percent)
+        if not np.isfinite(accidental_percent) or not 0 < accidental_percent <= 100:
+            raise WorkbookValidationError(
+                "نسبة اللامركزية العرضية يجب أن تكون أكبر من صفر ولا تتجاوز 100%."
+            )
+    rows = []
+    incomplete = False
+    for row in table.itertuples(index=False):
+        values = {
+            "xcm": pd.to_numeric(pd.Series([row.xcm]), errors="coerce").iloc[0],
+            "ycm": pd.to_numeric(pd.Series([row.ycm]), errors="coerce").iloc[0],
+            "xcr": pd.to_numeric(pd.Series([row.xcr]), errors="coerce").iloc[0],
+            "ycr": pd.to_numeric(pd.Series([row.ycr]), errors="coerce").iloc[0],
+        }
+        if all(pd.isna(value) for value in values.values()):
+            continue
+        for direction, coordinate, dimension in (
+            ("X", "y", dy),
+            ("Y", "x", dx),
+        ):
+            cm = values[f"{coordinate}cm"]
+            cr = values[f"{coordinate}cr"]
+            if pd.isna(cm) or pd.isna(cr) or not np.isfinite([cm, cr]).all():
+                incomplete = True
+                rows.append(
+                    {
+                        "story": row.story,
+                        "diaphragm": row.diaphragm,
+                        "direction": direction,
+                        "inherent_signed": np.nan,
+                        "inherent_absolute": np.nan,
+                        "accidental_magnitude": (
+                            dimension * accidental_percent / 100
+                            if accidental_percent is not None
+                            else np.nan
+                        ),
+                        "total_plus": np.nan,
+                        "total_minus": np.nan,
+                        "check": "NOT_EVALUATED",
+                    }
+                )
+                continue
+            inherent = float(cm - cr)
+            accidental = (
+                dimension * accidental_percent / 100
+                if accidental_percent is not None
+                else np.nan
+            )
+            rows.append(
+                {
+                    "story": row.story,
+                    "diaphragm": row.diaphragm,
+                    "direction": direction,
+                    "inherent_signed": inherent,
+                    "inherent_absolute": abs(inherent),
+                    "accidental_magnitude": accidental,
+                    "total_plus": (
+                        inherent + accidental if pd.notna(accidental) else np.nan
+                    ),
+                    "total_minus": (
+                        inherent - accidental if pd.notna(accidental) else np.nan
+                    ),
+                    "check": "INFORMATIONAL",
+                }
+            )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result, "NOT_EVALUATED"
+    if incomplete or (result["check"] == "NOT_EVALUATED").any():
+        status = "INCOMPLETE"
+    else:
+        status = "INFORMATIONAL"
+    return result, status
+
+
+def calculate_iraqi_2019_torsional_irregularity(
+    table: pd.DataFrame,
+    accidental_torsion_confirmed: bool,
+    accidental_percent: float | None,
+    seismic_design_category: str | None,
+    ax_applicability_confirmed: bool,
+) -> tuple[pd.DataFrame, str]:
+    cases = table["output_case"].astype(str)
+    seismic = table[cases.str.contains(r"EQ|RS|SPEC", case=False, na=False)].copy()
+    if accidental_percent is not None:
+        accidental_percent = float(accidental_percent)
+        if not np.isfinite(accidental_percent) or not 0 < accidental_percent <= 100:
+            raise WorkbookValidationError(
+                "نسبة اللامركزية العرضية يجب أن تكون أكبر من صفر ولا تتجاوز 100%."
+            )
+    cases_confirmed = accidental_torsion_confirmed and accidental_percent is not None
+    sdc = str(seismic_design_category or "").strip().upper()
+    sdc_selected = sdc in {"A", "B", "C", "D", "E", "F"}
+    rows = []
+    for row in seismic.itertuples(index=False):
+        direction_match = re.search(r"\b([XY])\s*$", str(row.item).upper())
+        if direction_match is None:
+            continue
+        direction = direction_match.group(1)
+        maximum = pd.to_numeric(pd.Series([row.max_drift]), errors="coerce").iloc[0]
+        average = pd.to_numeric(pd.Series([row.avg_drift]), errors="coerce").iloc[0]
+        supplied_ratio = pd.to_numeric(
+            pd.Series([row.ratio]), errors="coerce"
+        ).iloc[0]
+        if pd.notna(maximum) and pd.notna(average) and average != 0:
+            ratio = abs(float(maximum / average))
+            ratio_source = "Max Drift / Avg Drift"
+        elif pd.notna(supplied_ratio):
+            ratio = abs(float(supplied_ratio))
+            ratio_source = "ETABS Ratio"
+        else:
+            ratio = np.nan
+            ratio_source = "Unavailable"
+
+        valid = pd.notna(ratio) and np.isfinite(ratio) and ratio >= 0
+        if not valid:
+            candidate = "NOT_EVALUATED"
+            ax = np.nan
+            ax_status = "NOT_EVALUATED"
+        elif ratio > 1.4:
+            candidate = "Type 1b"
+            ax_status = "NOT_EVALUATED"
+            ax = np.nan
+            if cases_confirmed and sdc_selected and ax_applicability_confirmed:
+                ax = min((ratio / 1.2) ** 2, 3.0)
+                ax_status = "COMPUTED"
+        elif ratio > 1.2:
+            candidate = "Type 1a"
+            ax_status = "NOT_EVALUATED"
+            ax = np.nan
+            if cases_confirmed and sdc_selected and ax_applicability_confirmed:
+                ax = min((ratio / 1.2) ** 2, 3.0)
+                ax_status = "COMPUTED"
+        else:
+            candidate = "No torsional irregularity threshold exceeded"
+            ax = np.nan
+            ax_status = "NOT_REQUIRED"
+        rows.append(
+            {
+                "story": row.story,
+                "output_case": row.output_case,
+                "direction": direction,
+                "item": row.item,
+                "ratio": ratio,
+                "ratio_source": ratio_source,
+                "candidate_classification": candidate,
+                "ax": ax,
+                "ax_status": ax_status,
+                "check": (
+                    "INFORMATIONAL"
+                    if valid and cases_confirmed
+                    else "NOT_EVALUATED"
+                ),
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result, "NOT_EVALUATED"
+    if not cases_confirmed or result["ratio"].isna().any():
+        status = "NOT_EVALUATED" if not cases_confirmed else "INCOMPLETE"
+    else:
+        status = "INFORMATIONAL"
+    return result, status
 
 
 def pdelta_assessment(source_issue: str | None = None) -> dict[str, object]:

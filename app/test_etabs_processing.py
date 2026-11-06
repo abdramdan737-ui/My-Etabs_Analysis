@@ -9,6 +9,9 @@ from app.etabs_processing import (
     calculate_base_reactions,
     calculate_eccentricity,
     calculate_modal_mass,
+    calculate_iraqi_2019_story_drifts,
+    calculate_iraqi_2019_torsion_eccentricities,
+    calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
     get_cached_workbook,
     load_etabs_workbook,
@@ -86,6 +89,11 @@ def build_workbook(
             ["", "", "", "mm", "mm", "mm", "mm", "mm", "mm"],
             ["Story1", "EQX", "LinStatic", 1.5, 0.1, 0.0, 100, 200, 3500],
         )
+        sheets["Diaphragm Max Over Avg Drifts"] = (
+            ["Story", "Output Case", "Case Type", "Step Type", "Step Number", "Item", "Max Drift", "Avg Drift", "Ratio"],
+            ["", "", "", "", "", "", "", "", ""],
+            ["Story1", "EQX", "LinStatic", "", "", "Diaph D1 X", 0.0013, 0.001, 1.3],
+        )
     if omit_base_fx:
         headers, units, row = sheets["Base Reactions"]
         sheets["Base Reactions"] = (
@@ -141,6 +149,10 @@ class EtabsProcessingTests(unittest.TestCase):
         self.assertIn("base_reactions", workbook.tables)
         self.assertIn("Story Masses", workbook.missing_optional_sheets)
         self.assertIn("Joint Displacements", workbook.missing_optional_sheets)
+        self.assertIn(
+            "Diaphragm Max Over Avg Drifts", workbook.missing_optional_sheets
+        )
+        self.assertNotIn("diaphragm_drifts", workbook.tables)
 
     def test_reads_optional_etabs_tables_without_imposing_new_formulas(self):
         self.assertEqual(
@@ -148,6 +160,9 @@ class EtabsProcessingTests(unittest.TestCase):
         )
         self.assertEqual(
             self.workbook.tables["joint_displacements"].loc[0, "U1"], 1.5
+        )
+        self.assertAlmostEqual(
+            self.workbook.tables["diaphragm_drifts"].loc[0, "max_drift"], 0.0013
         )
         self.assertEqual(self.workbook.missing_optional_sheets, ())
 
@@ -159,6 +174,7 @@ class EtabsProcessingTests(unittest.TestCase):
         self.assertIn("Story Forces", labels)
         self.assertIn("Story Masses", labels)
         self.assertIn("Joint Displacements", labels)
+        self.assertIn("Diaphragm Max Over Avg Drifts", labels)
 
     def test_upload_must_use_results_xlsx_filename(self):
         validate_upload_filename("results.xlsx")
@@ -236,6 +252,202 @@ class EtabsProcessingTests(unittest.TestCase):
         self.assertEqual(status, "FAIL")
         self.assertEqual(result.loc[0, "check"], "PASS")
         self.assertEqual(result.loc[1, "check"], "FAIL")
+
+    def test_modal_mass_keeps_cases_separate(self):
+        modal = pd.DataFrame(
+            [
+                {"case": "ModalA", "sumux": 0.92, "sumuy": 0.83},
+                {"case": "ModalB", "sumux": 0.88, "sumuy": 0.94},
+            ]
+        )
+        result, status = calculate_modal_mass(modal)
+        self.assertEqual(status, "FAIL")
+        self.assertEqual(
+            result[["case", "direction", "check"]].values.tolist(),
+            [
+                ["ModalA", "X", "PASS"],
+                ["ModalA", "Y", "FAIL"],
+                ["ModalB", "X", "FAIL"],
+                ["ModalB", "Y", "PASS"],
+            ],
+        )
+
+    def test_iraqi_drift_uses_risk_category_and_cd_over_ie(self):
+        drifts = pd.DataFrame(
+            [
+                {"story": "Story1", "output_case": "EQX", "direction": "X", "drift": 0.003},
+                {"story": "Story2", "output_case": "EQX", "direction": "X", "drift": 0.004},
+            ]
+        )
+        result, status = calculate_iraqi_2019_story_drifts(
+            drifts, "III", applicability_confirmed=True, cd=5.5, ie=1.25
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertAlmostEqual(
+            result.loc[0, "design_drift_ratio"], 0.003 * 5.5 / 1.25
+        )
+        self.assertAlmostEqual(result.loc[0, "limit_ratio"], 0.015)
+        self.assertEqual(result["check"].tolist(), ["PASS", "FAIL"])
+
+    def test_iraqi_drift_limits_by_risk_category(self):
+        drifts = pd.DataFrame(
+            [{"story": "Story1", "output_case": "EQX", "direction": "X", "drift": 0.001}]
+        )
+        for category, expected_limit in (
+            ("I", 0.020),
+            ("II", 0.020),
+            ("III", 0.015),
+            ("IV", 0.010),
+        ):
+            with self.subTest(category=category):
+                result, status = calculate_iraqi_2019_story_drifts(
+                    drifts,
+                    category,
+                    applicability_confirmed=True,
+                    cd=1.0,
+                    ie=1.0,
+                )
+                self.assertEqual(status, "PASS")
+                self.assertEqual(result.loc[0, "limit_ratio"], expected_limit)
+
+    def test_iraqi_drift_stays_uncomputed_without_confirmed_applicability(self):
+        drifts = pd.DataFrame(
+            [{"story": "Story1", "output_case": "EQX", "direction": "X", "drift": 0.003}]
+        )
+        result, status = calculate_iraqi_2019_story_drifts(
+            drifts, "II", applicability_confirmed=False, cd=5.5, ie=1.0
+        )
+        self.assertEqual(status, "NOT_EVALUATED")
+        self.assertEqual(result.loc[0, "check"], "NOT_EVALUATED")
+        self.assertTrue(pd.isna(result.loc[0, "design_drift_ratio"]))
+
+    def test_iraqi_drift_stays_uncomputed_without_risk_category(self):
+        drifts = pd.DataFrame(
+            [{"story": "Story1", "output_case": "EQX", "direction": "X", "drift": 0.003}]
+        )
+        result, status = calculate_iraqi_2019_story_drifts(
+            drifts, None, applicability_confirmed=True, cd=5.5, ie=1.0
+        )
+        self.assertEqual(status, "NOT_EVALUATED")
+        self.assertEqual(result.loc[0, "check"], "NOT_EVALUATED")
+
+    def test_iraqi_torsion_uses_perpendicular_dimension_for_accidental_eccentricity(self):
+        result, status = calculate_iraqi_2019_torsion_eccentricities(
+            self.workbook.tables["centers"],
+            dx=20000,
+            dy=10000,
+            accidental_percent=5.0,
+        )
+        self.assertEqual(status, "INFORMATIONAL")
+        x_direction = result[result["direction"] == "X"].iloc[0]
+        y_direction = result[result["direction"] == "Y"].iloc[0]
+        self.assertAlmostEqual(x_direction["inherent_signed"], -50)
+        self.assertAlmostEqual(x_direction["accidental_magnitude"], 500)
+        self.assertAlmostEqual(y_direction["inherent_signed"], -100)
+        self.assertAlmostEqual(y_direction["accidental_magnitude"], 1000)
+
+    def test_torsion_leaves_accidental_offsets_uncomputed_without_selected_percent(self):
+        result, status = calculate_iraqi_2019_torsion_eccentricities(
+            self.workbook.tables["centers"],
+            dx=20000,
+            dy=10000,
+            accidental_percent=None,
+        )
+        self.assertEqual(status, "INFORMATIONAL")
+        self.assertTrue(result["inherent_absolute"].notna().all())
+        self.assertTrue(result["accidental_magnitude"].isna().all())
+
+    def test_torsional_irregularity_and_ax_are_conditional_and_capped(self):
+        drifts = pd.DataFrame(
+            [
+                {
+                    "story": "Story1",
+                    "output_case": "EQX",
+                    "item": "Diaph D1 X",
+                    "max_drift": 0.0024,
+                    "avg_drift": 0.001,
+                    "ratio": 2.4,
+                }
+            ]
+        )
+        diagnostic, diagnostic_status = calculate_iraqi_2019_torsional_irregularity(
+            drifts,
+            accidental_torsion_confirmed=False,
+            accidental_percent=None,
+            seismic_design_category=None,
+            ax_applicability_confirmed=False,
+        )
+        self.assertEqual(diagnostic_status, "NOT_EVALUATED")
+        self.assertEqual(diagnostic.loc[0, "candidate_classification"], "Type 1b")
+        self.assertTrue(pd.isna(diagnostic.loc[0, "ax"]))
+
+        no_percentage, no_percentage_status = calculate_iraqi_2019_torsional_irregularity(
+            drifts,
+            accidental_torsion_confirmed=True,
+            accidental_percent=None,
+            seismic_design_category="D",
+            ax_applicability_confirmed=True,
+        )
+        self.assertEqual(no_percentage_status, "NOT_EVALUATED")
+        self.assertTrue(pd.isna(no_percentage.loc[0, "ax"]))
+
+        confirmed, status = calculate_iraqi_2019_torsional_irregularity(
+            drifts,
+            accidental_torsion_confirmed=True,
+            accidental_percent=5.0,
+            seismic_design_category="D",
+            ax_applicability_confirmed=True,
+        )
+        self.assertEqual(status, "INFORMATIONAL")
+        self.assertEqual(confirmed.loc[0, "candidate_classification"], "Type 1b")
+        self.assertEqual(confirmed.loc[0, "ax"], 3.0)
+
+    def test_ax_stays_uncomputed_when_applicability_is_not_confirmed(self):
+        drifts = pd.DataFrame(
+            [
+                {
+                    "story": "Story1",
+                    "output_case": "EQX",
+                    "item": "Diaph D1 X",
+                    "max_drift": 0.0014,
+                    "avg_drift": 0.001,
+                    "ratio": 1.4,
+                }
+            ]
+        )
+        result, status = calculate_iraqi_2019_torsional_irregularity(
+            drifts,
+            accidental_torsion_confirmed=True,
+            accidental_percent=5.0,
+            seismic_design_category="C",
+            ax_applicability_confirmed=False,
+        )
+        self.assertEqual(status, "INFORMATIONAL")
+        self.assertEqual(result.loc[0, "candidate_classification"], "Type 1a")
+        self.assertTrue(pd.isna(result.loc[0, "ax"]))
+
+    def test_ax_stays_uncomputed_without_seismic_design_category(self):
+        drifts = pd.DataFrame(
+            [
+                {
+                    "story": "Story1",
+                    "output_case": "EQX",
+                    "item": "Diaph D1 X",
+                    "max_drift": 0.0014,
+                    "avg_drift": 0.001,
+                    "ratio": 1.4,
+                }
+            ]
+        )
+        result, _status = calculate_iraqi_2019_torsional_irregularity(
+            drifts,
+            accidental_torsion_confirmed=True,
+            accidental_percent=2.0,
+            seismic_design_category=None,
+            ax_applicability_confirmed=True,
+        )
+        self.assertTrue(pd.isna(result.loc[0, "ax"]))
+        self.assertEqual(result.loc[0, "ax_status"], "NOT_EVALUATED")
 
     def test_pdelta_is_explicitly_not_evaluated(self):
         result = pdelta_assessment()

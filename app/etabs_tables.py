@@ -15,6 +15,9 @@ from app.etabs_processing import (
     calculate_base_reactions,
     calculate_eccentricity,
     calculate_modal_mass,
+    calculate_iraqi_2019_story_drifts,
+    calculate_iraqi_2019_torsion_eccentricities,
+    calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
     get_cached_workbook,
     pdelta_assessment,
@@ -56,6 +59,7 @@ STATUS_LABELS = {
     "INCOMPLETE": "غير مكتمل ⚠️",
     "NOT_EVALUATED": "غير محسوب ⚠️",
     "ERROR": "خطأ في المدخلات ⚠️",
+    "INFORMATIONAL": "معلوماتي — لا يصدر حكم مطابقة",
 }
 SECTION_NAMES = {
     "Centers Of Mass": "مراكز الكتلة والصلابة",
@@ -65,6 +69,8 @@ SECTION_NAMES = {
     "Displacements": "أقصى/متوسط الإزاحة",
     "Story Stiffness": "صلابة الطوابق",
     "P-Delta Check": "فحص P-Delta",
+    "Iraqi 2019 Drift": "انجراف الطوابق — الكود العراقي 2019",
+    "Iraqi Torsion": "الالتواء واللامركزية — الكود العراقي 2019",
 }
 
 
@@ -110,6 +116,28 @@ def generate_word_report(
         ("R", project["r"]),
         ("Cd", project["cd"]),
         ("Ie", project["ie"]),
+        ("فئة المخاطر وفق الكود العراقي 2019", project["risk_category"] or "غير محددة"),
+        ("فئة التصميم الزلزالي SDC", project["seismic_design_category"] or "غير محددة"),
+        (
+            "انطباق حد فئة المنشآت الخرسانية الأخرى",
+            "مؤكد من المستخدم" if project["drift_applicability_confirmed"] else "غير مؤكد",
+        ),
+        (
+            "نسبة اللامركزية العرضية المختارة",
+            (
+                f"{project['accidental_eccentricity_percent']:.2f}%"
+                if project["accidental_eccentricity_percent"] is not None
+                else "غير محددة"
+            ),
+        ),
+        (
+            "تأكيد حالات الالتواء العرضي",
+            "مؤكد من المستخدم" if project["accidental_torsion_confirmed"] else "غير مؤكد",
+        ),
+        (
+            "تأكيد انطباق معامل Ax",
+            "مؤكد من المستخدم" if project["ax_applicability_confirmed"] else "غير مؤكد",
+        ),
         ("Tx (sec)", project["tx"]),
         ("Ty (sec)", project["ty"]),
         ("Dx (ملم)", project["dx"]),
@@ -144,6 +172,32 @@ def generate_word_report(
     document.add_paragraph(
         "فحص الصلابة ونسبة أقصى/متوسط الإزاحة معروضان كبيانات خام دون حكم؛ "
         "لم يتوفر في القالب تعريف مكتمل لحدود التحقق."
+    )
+    document.add_paragraph(
+        "الأصل في هذه الفحوص هو الكود الزلزالي العراقي 2019. فحص الانجراف يفترض "
+        "أن قيم Story Drifts خطية/مرنة، ويحسب انجراف التصميم = الانجراف المرن × "
+        "Cd / Ie وفق معادلة الانجراف في الفصل 3، §3-9-7، المعادلة (3-9-14). "
+        "حدود الصف المختار للمنشآت الخرسانية الأخرى: 0.020 لفئتي المخاطر I/II، "
+        "و0.015 للفئة III، و0.010 للفئة IV (جدول حدود الانجراف، الفصل 3، "
+        "الصفحة المطبوعة 39/3). لا يُحسب الفحص قبل تحديد الفئة وتأكيد انطباق "
+        "هذا النوع من المنشآت."
+    )
+    document.add_paragraph(
+        "حد 90% لمقارنة SumUX وSumUY هو المعيار الذي قدمه المستخدم، ويطبق "
+        "لكل حالة نمطية على حدة؛ لم يُتحقق رقمياً من نص الحد في نسخة الكود "
+        "المحلية، لذلك لا يُنسب هذا الرقم إلى الكود العراقي. اللامركزية الجوهرية "
+        "تحسب من إحداثيات CM/CR. نسبة اللامركزية العرضية "
+        "لا تُفترض: مستخرج النص المحلي لصفحة الالتواء من نسخة الكود المقدمة "
+        "يعرض قيمة ملتبسة؛ لذلك يلزم اختيار النسبة صراحة لكل تحليل. لا تثبت "
+        "الإزاحة النظرية وحدها إدراج اللامركزية العرضية في حالات التحليل."
+    )
+    document.add_paragraph(
+        "تُعرض عتبتا 1.2 و1.4 كنسب فحص مرشحة من معايير ASCE 7-16 التي قدمها "
+        "المستخدم، ولا تُنسبان إلى الكود العراقي ما لم يثبت ذلك من نصه. معادلة "
+        "Ax وحده الأقصى 3.0 مأخوذان من الكود العراقي، الفصل 3، §3-9-5، "
+        "المعادلة (3-9-12). لا يُحسب Ax إلا بعد تأكيد تضمين اللامركزية العرضية "
+        "في حالات ETABS، واختيار SDC وتأكيد انطباق شروطه؛ ولا يتحقق التطبيق من "
+        "تنفيذ الحالات أو المعامل فعلياً."
     )
     document.add_paragraph(str(pdelta["message"]))
     for item in pdelta["required_inputs"]:
@@ -257,6 +311,58 @@ soil_options = {
 selected_soil = st.sidebar.selectbox("نوع التربة (Site Class)", list(soil_options))
 soil_factor_s = soil_options[selected_soil]
 importance_factor = st.sidebar.selectbox("عامل الأهمية (Ie)", [1.0, 1.25, 1.5])
+risk_category_option = st.sidebar.selectbox(
+    "فئة المخاطر وفق الكود العراقي 2019",
+    ["— اختر الفئة لكل تحليل —", "I", "II", "III", "IV"],
+)
+risk_category = None if risk_category_option.startswith("—") else risk_category_option
+sdc_option = st.sidebar.selectbox(
+    "فئة التصميم الزلزالي SDC",
+    ["— اختر الفئة لكل تحليل —", "A", "B", "C", "D", "E", "F"],
+)
+seismic_design_category = None if sdc_option.startswith("—") else sdc_option
+drift_applicability_confirmed = st.sidebar.checkbox(
+    "أؤكد انطباق حد «المنشآت الخرسانية الأخرى» للانجراف"
+)
+accidental_percent_option = st.sidebar.selectbox(
+    "نسبة اللامركزية العرضية حسب المرجع المختار",
+    [
+        "— اختر النسبة لكل تحليل —",
+        "2% (من استخراج نص الكود العراقي؛ يلزم التحقق من الصفحة)",
+        "5% (معيار ASCE 7-16 المرشح)",
+        "نسبة أخرى",
+    ],
+)
+if accidental_percent_option.startswith("2%"):
+    accidental_eccentricity_percent = 2.0
+elif accidental_percent_option.startswith("5%"):
+    accidental_eccentricity_percent = 5.0
+elif accidental_percent_option == "نسبة أخرى":
+    custom_accidental_percent = st.sidebar.number_input(
+        "نسبة اللامركزية العرضية المخصصة (%) — الصفر يعني غير محددة",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0,
+        step=0.5,
+    )
+    accidental_eccentricity_percent = (
+        custom_accidental_percent if custom_accidental_percent > 0 else None
+    )
+else:
+    accidental_eccentricity_percent = None
+accidental_torsion_confirmed = st.sidebar.checkbox(
+    "أؤكد أن الحالات المختارة في ETABS تشمل النسبة المحددة وبالإشارتين",
+    disabled=accidental_eccentricity_percent is None,
+)
+ax_applicability_confirmed = st.sidebar.checkbox(
+    "أؤكد انطباق شروط Ax على فئة SDC والنظام المختارين",
+    disabled=not accidental_torsion_confirmed or seismic_design_category is None,
+)
+st.sidebar.caption(
+    "تُختار فئة المخاطر وSDC والانطباق لكل تحليل. يظهر استخراج نص صفحة الالتواء "
+    "رقم 2% لكن تعذر التحقق البصري من الصفحة؛ لذلك لا تُختار أي نسبة تلقائياً. "
+    "حساب Ax يحتاج تأكيد إدراج اللامركزية في الحالات وانطباق شروطه."
+)
 seismic_systems = {
     "جدران قص / جدران حاملة [R=5.0, Cd=4.5]": (5.0, 4.5),
     "إطارات خرسانية خاصة [R=8.0, Cd=5.5]": (8.0, 5.5),
@@ -306,12 +412,13 @@ st.markdown("### 📐 أبعاد المبنى")
 col_dx, col_dy = st.columns(2)
 with col_dx:
     dx_val = st.number_input(
-        "البعد الإجمالي للمبنى Dx (ملم)", min_value=0.0, value=16000.0, step=100.0
+        "البعد الإجمالي للمبنى Dx (ملم)", min_value=0.0, value=0.0, step=100.0
     )
 with col_dy:
     dy_val = st.number_input(
-        "البعد الإجمالي للمبنى Dy (ملم)", min_value=0.0, value=25000.0, step=100.0
+        "البعد الإجمالي للمبنى Dy (ملم)", min_value=0.0, value=0.0, step=100.0
     )
+st.caption("أدخل أبعاد المخطط الفعلية؛ الصفر يعني أن حسابات اللامركزية الهندسية غير محسوبة.")
 
 if uploaded_file is None:
     st.session_state.pop("etabs_workbook", None)
@@ -379,20 +486,25 @@ else:
 
         st.header("1. مراكز الكتلة والصلابة")
         st.caption("eₓ = |XCR − XCM|، eᵧ = |YCR − YCM|؛ النسبة تقارن بأبعاد Dx وDy المدخلة.")
-        try:
-            centers, status_dict["Centers Of Mass"] = calculate_eccentricity(
-                tables["centers"], dx_val, dy_val
-            )
-            st.dataframe(centers.round(3), width="stretch")
-            max_x = centers["ex_dx_percent"].dropna().max()
-            max_y = centers["ey_dy_percent"].dropna().max()
-            if pd.notna(max_x) and pd.notna(max_y):
-                report_findings.append(
-                    f"أقصى لا مركزية نسبية: X = {max_x:.2f}%، Y = {max_y:.2f}%."
+        if dx_val <= 0 or dy_val <= 0:
+            status_dict["Centers Of Mass"] = "NOT_EVALUATED"
+            st.info("أدخل Dx وDy الفعليين لحساب النسب الهندسية.")
+            st.dataframe(tables["centers"], width="stretch")
+        else:
+            try:
+                centers, status_dict["Centers Of Mass"] = calculate_eccentricity(
+                    tables["centers"], dx_val, dy_val
                 )
-        except WorkbookValidationError as exc:
-            status_dict["Centers Of Mass"] = "ERROR"
-            st.error(str(exc))
+                st.dataframe(centers.round(3), width="stretch")
+                max_x = centers["ex_dx_percent"].dropna().max()
+                max_y = centers["ey_dy_percent"].dropna().max()
+                if pd.notna(max_x) and pd.notna(max_y):
+                    report_findings.append(
+                        f"أقصى لا مركزية نسبية: X = {max_x:.2f}%، Y = {max_y:.2f}%."
+                    )
+            except WorkbookValidationError as exc:
+                status_dict["Centers Of Mass"] = "ERROR"
+                st.error(str(exc))
         st.markdown("---")
 
         st.header("2. القص القاعدي ومعامل التحجيم")
@@ -447,8 +559,47 @@ else:
             st.dataframe(tables["story_drifts"], width="stretch")
         st.markdown("---")
 
-        st.header("4. مشاركة الكتلة النمطية")
-        st.caption("تُفحص أكبر مشاركة كتلة تراكمية في كل اتجاه مقابل 90%.")
+        st.header("فحص الانجراف وفق الكود الزلزالي العراقي 2019")
+        st.caption(
+            "يفترض هذا الفحص أن قيم ETABS في Story Drifts انجرافات مرنة، "
+            "ويحسب انجراف التصميم = القيمة المرنة × Cd / Ie وفق الفصل 3، "
+            "§3-9-7، المعادلة (3-9-14). يستخدم صف «المنشآت الخرسانية الأخرى» "
+            "من جدول حدود الانجراف، الصفحة المطبوعة 39/3: I/II = 0.020، "
+            "III = 0.015، IV = 0.010. يلزم اختيار فئة المخاطر وتأكيد انطباق الصف."
+        )
+        iraqi_drifts, status_dict["Iraqi 2019 Drift"] = calculate_iraqi_2019_story_drifts(
+            tables["story_drifts"],
+            risk_category,
+            drift_applicability_confirmed,
+            deflection_cd,
+            importance_factor,
+        )
+        if iraqi_drifts.empty:
+            st.warning("لم تتوفر صفوف جانبية صالحة في Story Drifts لإجراء الفحص.")
+        else:
+            st.dataframe(iraqi_drifts.round(6), width="stretch")
+            for direction, direction_rows in iraqi_drifts.groupby("direction"):
+                max_drift = direction_rows["design_drift_ratio"].dropna().max()
+                limit = direction_rows["limit_ratio"].dropna().max()
+                if pd.notna(max_drift) and pd.notna(limit):
+                    report_findings.append(
+                        f"الكود العراقي 2019، الفئة {risk_category}، الاتجاه {direction}: "
+                        f"أقصى انجراف تصميم {max_drift:.6f} مقابل حد {limit:.6f} "
+                        f"(Cd/Ie = {deflection_cd / importance_factor:.3f})."
+                    )
+        if status_dict["Iraqi 2019 Drift"] == "NOT_EVALUATED":
+            st.info(
+                "فحص الكود العراقي غير محسوب حتى اختيار فئة المخاطر وتأكيد انطباق "
+                "حد «المنشآت الخرسانية الأخرى»."
+            )
+        st.markdown("---")
+
+        st.header("4. مشاركة الكتلة النمطية — معيار 90% المقدم")
+        st.caption(
+            "تُفحص أكبر مشاركة كتلة تراكمية SumUX/SumUY لكل حالة في كل اتجاه "
+            "مقابل 90% لكل حالة نمطية. هذا الحد مقدم من المستخدم، وليس نسخاً "
+            "موثقاً من نص الكود العراقي."
+        )
         modal, status_dict["Modal Mass Ratios"] = calculate_modal_mass(
             tables["modal_mass"]
         )
@@ -456,9 +607,111 @@ else:
         for row in modal.itertuples(index=False):
             if pd.notna(row.maximum_percent):
                 report_findings.append(
-                    f"أقصى مشاركة كتلة تراكمية في {row.direction}: "
-                    f"{row.maximum_percent:.2f}%."
+                    f"الحالة النمطية {row.case}، الاتجاه {row.direction}: "
+                    f"أقصى مشاركة كتلة تراكمية {row.maximum_percent:.2f}%."
                 )
+        st.markdown("---")
+
+        st.header("اللامركزية والالتواء — الكود العراقي 2019")
+        st.caption(
+            "لامركزية X تستخدم فرق YCM−YCR والبعد Dy، ولامركزية Y تستخدم "
+            "XCM−XCR والبعد Dx. لا تُفترض نسبة اللامركزية العرضية: مستخرج نص "
+            "الصفحة المطبوعة 16/3 يظهر 2% لكن تعذر التحقق البصري منه. اختر النسبة "
+            "المعتمدة قبل حساب الإزاحات النظرية."
+        )
+        try:
+            eccentricities, eccentricity_status = (
+                calculate_iraqi_2019_torsion_eccentricities(
+                    tables["centers"],
+                    dx_val,
+                    dy_val,
+                    accidental_eccentricity_percent,
+                )
+            )
+            if eccentricities.empty:
+                st.warning("لا توجد إحداثيات CM/CR كافية لحساب اللامركزية.")
+            else:
+                st.dataframe(eccentricities.round(3), width="stretch")
+                available_eccentricities = eccentricities[
+                    eccentricities["check"] == "INFORMATIONAL"
+                ]
+                for direction, direction_rows in available_eccentricities.groupby(
+                    "direction"
+                ):
+                    max_inherent = direction_rows["inherent_absolute"].max()
+                    max_accidental = direction_rows["accidental_magnitude"].max()
+                    accidental_summary = (
+                        f"مقدار ±{accidental_eccentricity_percent:.2f}% النظري "
+                        f"{max_accidental:.2f} ملم."
+                        if pd.notna(max_accidental)
+                        else "نسبة اللامركزية العرضية لم تُحدد."
+                    )
+                    report_findings.append(
+                        f"الاتجاه {direction}: أكبر لامركزية جوهرية "
+                        f"{max_inherent:.2f} ملم؛ {accidental_summary}"
+                    )
+        except WorkbookValidationError as exc:
+            eccentricity_status = "NOT_EVALUATED"
+            st.warning(f"تعذر حساب اللامركزية وفق الكود العراقي: {exc}")
+        if "diaphragm_drifts" in tables:
+            torsional, status_dict["Iraqi Torsion"] = (
+                calculate_iraqi_2019_torsional_irregularity(
+                    tables["diaphragm_drifts"],
+                    accidental_torsion_confirmed,
+                    accidental_eccentricity_percent,
+                    seismic_design_category,
+                    ax_applicability_confirmed,
+                )
+            )
+            if torsional.empty:
+                st.warning(
+                    "لم توجد صفوف زلزالية صالحة في Diaphragm Max Over Avg Drifts."
+                )
+            else:
+                st.dataframe(torsional.round(4), width="stretch")
+                valid_torsion = torsional[torsional["ratio"].notna()]
+                if not valid_torsion.empty:
+                    max_ratio = valid_torsion["ratio"].max()
+                    has_ax = valid_torsion["ax"].notna().any()
+                    report_findings.append(
+                        f"أقصى نسبة أقصى/متوسط انجراف للحجاب الحاجز: "
+                        f"{max_ratio:.3f}. عتبتا 1.2/1.4 من معايير ASCE 7-16 "
+                        f"المرشحة. Ax "
+                        f"{'حُسب بعد تأكيد الشروط' if has_ax else 'غير محسوب؛ شروط الانطباق أو بياناته غير مؤكدة'}."
+                    )
+                if not accidental_torsion_confirmed:
+                    st.info(
+                        "تعرض النسب كتشخيص أولي فقط. لا يصدر تصنيف لالتواء كودي "
+                        "ولا يحسب Ax قبل تأكيد أن الحالات تشمل اللامركزية العرضية "
+                        "بالنسبة المختارة وبالإشارتين."
+                    )
+                elif not ax_applicability_confirmed:
+                    st.info(
+                        "تم تصنيف النسبة كإشارة معلوماتية، لكن Ax غير محسوب حتى "
+                        "اختيار SDC وتأكيد انطباق شروطه."
+                    )
+                elif status_dict["Iraqi Torsion"] == "INFORMATIONAL":
+                    st.caption(
+                        "وفق الكود العراقي 2019، الفصل 3، §3-9-5، المعادلة "
+                        "(3-9-12): Ax = min((δmax/(1.2δavg))², 3.0). "
+                        "لا يتحقق التطبيق من تنفيذ Ax فعلياً في حالات ETABS."
+                    )
+        else:
+            status_dict["Iraqi Torsion"] = "NOT_EVALUATED"
+            issue = workbook.optional_table_issues.get("diaphragm_drifts")
+            if issue:
+                st.warning(
+                    "تعذر استخدام جدول Diaphragm Max Over Avg Drifts: " + issue
+                )
+            else:
+                st.info(
+                    "جدول Diaphragm Max Over Avg Drifts غير موجود؛ لا يمكن تقييم "
+                    "نسبة الالتواء العرضي أو Ax."
+                )
+        st.caption(
+            f"حالة حساب اللامركزية الهندسية: {status_label(eccentricity_status)}. "
+            "هذه قيم هندسية/استشارية وليست حكماً مستقلاً بالمطابقة."
+        )
         st.markdown("---")
 
         st.header("5. أقصى/متوسط الإزاحة")
@@ -517,6 +770,12 @@ else:
             "r": response_mod_r,
             "cd": deflection_cd,
             "ie": importance_factor,
+            "risk_category": risk_category,
+            "seismic_design_category": seismic_design_category,
+            "drift_applicability_confirmed": drift_applicability_confirmed,
+            "accidental_eccentricity_percent": accidental_eccentricity_percent,
+            "accidental_torsion_confirmed": accidental_torsion_confirmed,
+            "ax_applicability_confirmed": ax_applicability_confirmed,
             "tx": tx_val,
             "ty": ty_val,
             "dx": dx_val,
