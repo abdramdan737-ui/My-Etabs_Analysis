@@ -7,15 +7,6 @@ from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
-import os
-import pandas as pd
-
-# 1. ضع هذا الكود في بداية السكريبت لتحديد المسار الصحيح تلقائياً
-current_dir = os.path.dirname(os.path.abspath(__file__))
-excel_path = os.path.join(current_dir, "result_tables.xlsx")
-
-# 2. استخدم المتغير excel_path عند قراءة ملف الإكسيل هكذا:
-df = pd.read_excel(excel_path)
 
 # إعدادات واجهة التطبيق
 st.set_page_config(
@@ -72,7 +63,7 @@ st.write(
 ) 
 st.subheader("🛠️ المنصة من اعداد وتصميم المهندس الاستشاري عبدالغفور رمضان اللهيبي - 2026")
 
-files_dir = os.getcwd()
+files_dir = os.path.dirname(os.path.abspath(__file__))
 
 def get_excel_file_path():
     for ext in [".xlsx", ".xls", ".XLSX", ".XLS"]:

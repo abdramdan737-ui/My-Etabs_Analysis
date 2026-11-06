@@ -35,4 +35,4 @@ COPY --chown=user:user . /home/user/app
 EXPOSE 7860
 
 # أمر تشغيل التطبيق (مع ربطه بالمنفذ 7860 والعنوان 0.0.0.0)
-CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app/etabs_tables.py", "--server.port=7860", "--server.address=0.0.0.0"]
