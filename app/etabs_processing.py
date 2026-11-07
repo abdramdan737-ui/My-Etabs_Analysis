@@ -1,7 +1,7 @@
 import io
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import BinaryIO, MutableMapping
 
 import numpy as np
@@ -15,9 +15,6 @@ class WorkbookValidationError(ValueError):
 @dataclass
 class EtabsWorkbook:
     tables: dict[str, pd.DataFrame]
-    pdelta_source_issue: str | None = None
-    missing_optional_sheets: tuple[str, ...] = ()
-    optional_table_issues: dict[str, str] = field(default_factory=dict)
 
 
 REQUIRED_SHEETS = {
@@ -38,7 +35,6 @@ OPTIONAL_TABLES = {
     "story_forces": {
         "label": "Story Forces",
         "aliases": ("Story Forces",),
-        "pdelta_source": True,
     },
     "diaphragm_displacements": {
         "label": "Diaphragm CM Displacements",
@@ -46,29 +42,18 @@ OPTIONAL_TABLES = {
             "Diaphragm CM Displacements",
             "Diaphragm Center Of Mass Displacements",
         ),
-        "pdelta_source": False,
     },
     "story_mass": {
         "label": "Story Masses",
         "aliases": ("Story Masses", "Story Mass", "Story Mass Summary"),
-        "pdelta_source": False,
     },
     "joint_displacements": {
         "label": "Joint Displacements",
         "aliases": ("Joint Displacements",),
-        "pdelta_source": False,
     },
     "diaphragm_drifts": {
         "label": "Diaphragm Max Over Avg Drifts",
         "aliases": ("Diaphragm Max Over Avg Drifts",),
-        "pdelta_source": False,
-    },
-}
-
-SHEET_ALIASES = {
-    **{key: names for key, names in REQUIRED_SHEETS.items()},
-    **{
-        key: table["aliases"] for key, table in OPTIONAL_TABLES.items()
     },
 }
 
@@ -77,14 +62,9 @@ OPTIONAL_SHEET_NAMES = tuple(
     for key, table in OPTIONAL_TABLES.items()
 )
 
-OPTIONAL_PDELTA_SHEETS = tuple(
-    table["label"]
-    for table in OPTIONAL_TABLES.values()
-    if table["pdelta_source"]
-)
-
 MAX_CACHED_WORKBOOK_VERSIONS = 4
 CACHE_SESSION_KEY = "_etabs_workbook_versions"
+OPTIONAL_TABLE_CACHE_SESSION_KEY = "_etabs_optional_table_versions"
 
 COLUMNS = {
     "centers": {
@@ -234,6 +214,32 @@ def get_cached_workbook(
     return content_hash, workbook
 
 
+def get_cached_optional_table(
+    session_state: MutableMapping[str, object],
+    content: bytes,
+    table_key: str,
+) -> tuple[str, pd.DataFrame]:
+    content_hash = hashlib.sha256(content).hexdigest()
+    versions = session_state.setdefault(OPTIONAL_TABLE_CACHE_SESSION_KEY, {})
+    if not isinstance(versions, dict):
+        versions = {}
+        session_state[OPTIONAL_TABLE_CACHE_SESSION_KEY] = versions
+
+    cache_key = (table_key, content_hash)
+    cached = versions.get(cache_key)
+    if isinstance(cached, pd.DataFrame):
+        return content_hash, cached
+
+    table = load_optional_etabs_table(content, table_key)
+    versions[cache_key] = table
+    max_versions = MAX_CACHED_WORKBOOK_VERSIONS * len(OPTIONAL_TABLES)
+    while len(versions) > max_versions:
+        oldest_key = next(iter(versions))
+        del versions[oldest_key]
+    session_state[OPTIONAL_TABLE_CACHE_SESSION_KEY] = versions
+    return content_hash, table
+
+
 def _find_column(columns: list[object], aliases: tuple[str, ...]) -> object | None:
     for alias in aliases:
         exact = [column for column in columns if str(column).strip().casefold() == alias.casefold()]
@@ -308,7 +314,7 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
     sheet_names = excel.sheet_names
     selected_sheets = {
         key: _find_sheet(sheet_names, aliases)
-        for key, aliases in SHEET_ALIASES.items()
+        for key, aliases in REQUIRED_SHEETS.items()
     }
     missing = missing_required_sheets(sheet_names)
     if missing:
@@ -320,16 +326,7 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
         )
 
     tables = {}
-    optional_issues = {}
-    missing_optional = missing_optional_sheets(sheet_names)
-    pdelta_issues = [
-        f"الورقة الاختيارية {label} غير موجودة"
-        for key, label, _aliases in missing_optional
-        if OPTIONAL_TABLES[key]["pdelta_source"]
-    ]
     for key, sheet_name in selected_sheets.items():
-        if sheet_name is None:
-            continue
         try:
             raw_frame = pd.read_excel(
                 excel, sheet_name=sheet_name, skiprows=[0, 2], header=0
@@ -340,29 +337,55 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
                 COLUMNS.get(key, {}),
                 OPTIONAL_COLUMNS.get(key, {}),
             )
-        except WorkbookValidationError as exc:
-            if key in REQUIRED_SHEETS:
-                raise
-            optional_issues[key] = str(exc)
-            if OPTIONAL_TABLES[key]["pdelta_source"]:
-                pdelta_issues.append(f"{sheet_name}: {exc}")
+        except WorkbookValidationError:
+            raise
         except Exception as exc:
-            if key in REQUIRED_SHEETS:
-                raise WorkbookValidationError(
-                    f"تعذر قراءة ورقة {sheet_name}: {exc}"
-                ) from exc
-            optional_issues[key] = str(exc)
-            if OPTIONAL_TABLES[key]["pdelta_source"]:
-                pdelta_issues.append(f"تعذر قراءة ورقة {sheet_name}: {exc}")
+            raise WorkbookValidationError(
+                f"تعذر قراءة ورقة {sheet_name}: {exc}"
+            ) from exc
 
-    return EtabsWorkbook(
-        tables=tables,
-        pdelta_source_issue="؛ ".join(pdelta_issues) if pdelta_issues else None,
-        missing_optional_sheets=tuple(
-            label for _key, label, _aliases in missing_optional
-        ),
-        optional_table_issues=optional_issues,
-    )
+    return EtabsWorkbook(tables=tables)
+
+
+def load_optional_etabs_table(
+    source: bytes | bytearray | BinaryIO,
+    table_key: str,
+) -> pd.DataFrame:
+    optional_table = OPTIONAL_TABLES.get(table_key)
+    if optional_table is None:
+        raise WorkbookValidationError(f"جدول ETABS اختياري غير معروف: {table_key}")
+
+    content = _read_bytes(source)
+    try:
+        excel = pd.ExcelFile(io.BytesIO(content))
+    except Exception as exc:
+        raise WorkbookValidationError(
+            "تعذر فتح الملف الإضافي. يرجى رفع مصنف Excel بصيغة .xlsx صالح."
+        ) from exc
+
+    sheet_name = _find_sheet(excel.sheet_names, optional_table["aliases"])
+    if sheet_name is None:
+        expected_names = " / ".join(optional_table["aliases"])
+        raise WorkbookValidationError(
+            f"الورقة المطلوبة للجدول الاختياري غير موجودة: {expected_names}."
+        )
+
+    try:
+        raw_frame = pd.read_excel(
+            excel, sheet_name=sheet_name, skiprows=[0, 2], header=0
+        )
+        return _canonicalize_table(
+            raw_frame,
+            sheet_name,
+            COLUMNS.get(table_key, {}),
+            OPTIONAL_COLUMNS.get(table_key, {}),
+        )
+    except WorkbookValidationError:
+        raise
+    except Exception as exc:
+        raise WorkbookValidationError(
+            f"تعذر قراءة ورقة {sheet_name}: {exc}"
+        ) from exc
 
 
 def _positive_number(value: float, name: str) -> float:

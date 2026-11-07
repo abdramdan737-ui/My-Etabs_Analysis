@@ -2,7 +2,7 @@ import io
 import unittest
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from app.etabs_processing import (
     WorkbookValidationError,
@@ -14,7 +14,9 @@ from app.etabs_processing import (
     calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
     calculate_pdelta_screening,
+    get_cached_optional_table,
     get_cached_workbook,
+    load_optional_etabs_table,
     load_etabs_workbook,
     MAX_CACHED_WORKBOOK_VERSIONS,
     missing_optional_sheets,
@@ -140,33 +142,90 @@ class EtabsProcessingTests(unittest.TestCase):
         self.assertIn(("Centers Of Mass And Rigidity",), missing_aliases)
         self.assertNotIn(("Base Reactions",), missing_aliases)
 
-    def test_missing_pdelta_sheets_are_reported_but_do_not_block_other_checks(self):
+    def test_missing_optional_tables_do_not_block_core_workbook(self):
         workbook = load_etabs_workbook(
             build_workbook(
                 include_pdelta_sheets=False, include_additional_sheets=False
             )
         )
-        self.assertIn("Story Forces", workbook.pdelta_source_issue)
-        self.assertNotIn("Diaphragm CM Displacements", workbook.pdelta_source_issue)
         self.assertIn("base_reactions", workbook.tables)
-        self.assertIn("Story Masses", workbook.missing_optional_sheets)
-        self.assertIn("Joint Displacements", workbook.missing_optional_sheets)
-        self.assertIn(
-            "Diaphragm Max Over Avg Drifts", workbook.missing_optional_sheets
-        )
+        self.assertNotIn("story_forces", workbook.tables)
         self.assertNotIn("diaphragm_drifts", workbook.tables)
 
-    def test_reads_optional_etabs_tables_without_imposing_new_formulas(self):
+    def test_core_workbook_parses_only_required_sheets(self):
         self.assertEqual(
-            self.workbook.tables["story_mass"].loc[0, "Mass X"], 1.0
+            set(self.workbook.tables),
+            {
+                "centers",
+                "base_reactions",
+                "story_drifts",
+                "modal_mass",
+                "story_stiffness",
+                "displacements",
+            },
         )
-        self.assertEqual(
-            self.workbook.tables["joint_displacements"].loc[0, "U1"], 1.5
+
+    def test_core_workbook_ignores_malformed_optional_sheets(self):
+        workbook = load_workbook(io.BytesIO(build_workbook()))
+        del workbook["Story Forces"]
+        malformed = workbook.create_sheet("Story Forces")
+        malformed.append(["TABLE: Story Forces"])
+        malformed.append(["Not an ETABS column"])
+        malformed.append([""])
+        malformed.append(["invalid"])
+        stream = io.BytesIO()
+        workbook.save(stream)
+
+        parsed = load_etabs_workbook(stream.getvalue())
+
+        self.assertIn("base_reactions", parsed.tables)
+        self.assertNotIn("story_forces", parsed.tables)
+
+    def test_optional_workbooks_can_contain_only_the_requested_table(self):
+        expected_tables = {
+            "story_forces": "Story Forces",
+            "diaphragm_displacements": "Diaphragm CM Displacements",
+            "story_mass": "Story Masses",
+            "joint_displacements": "Joint Displacements",
+            "diaphragm_drifts": "Diaphragm Max Over Avg Drifts",
+        }
+        for table_key, sheet_name in expected_tables.items():
+            with self.subTest(table_key=table_key):
+                workbook = load_workbook(io.BytesIO(build_workbook()))
+                for existing_sheet in list(workbook.sheetnames):
+                    if existing_sheet != sheet_name:
+                        del workbook[existing_sheet]
+                stream = io.BytesIO()
+                workbook.save(stream)
+
+                table = load_optional_etabs_table(stream.getvalue(), table_key)
+
+                self.assertFalse(table.empty)
+
+    def test_optional_loader_requires_its_specific_sheet(self):
+        with self.assertRaisesRegex(WorkbookValidationError, "Story Forces"):
+            load_optional_etabs_table(
+                build_workbook(include_pdelta_sheets=False),
+                "story_forces",
+            )
+
+    def test_optional_table_cache_is_scoped_by_table(self):
+        state = {}
+        content = build_workbook()
+
+        _hash, drifts = get_cached_optional_table(
+            state, content, "diaphragm_drifts"
         )
-        self.assertAlmostEqual(
-            self.workbook.tables["diaphragm_drifts"].loc[0, "max_drift"], 0.0013
+        _same_hash, cached_drifts = get_cached_optional_table(
+            state, content, "diaphragm_drifts"
         )
-        self.assertEqual(self.workbook.missing_optional_sheets, ())
+        _same_content_hash, forces = get_cached_optional_table(
+            state, content, "story_forces"
+        )
+
+        self.assertIs(drifts, cached_drifts)
+        self.assertAlmostEqual(drifts.loc[0, "max_drift"], 0.0013)
+        self.assertEqual(forces.loc[0, "p"], 100)
 
     def test_optional_sheet_names_are_listed_when_missing(self):
         missing = missing_optional_sheets(

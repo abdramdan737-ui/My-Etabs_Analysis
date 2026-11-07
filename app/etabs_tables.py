@@ -8,7 +8,6 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.shared import Pt, RGBColor
 
 from app.etabs_processing import (
-    OPTIONAL_PDELTA_SHEETS,
     OPTIONAL_SHEET_NAMES,
     REQUIRED_SHEET_NAMES,
     WorkbookValidationError,
@@ -20,6 +19,7 @@ from app.etabs_processing import (
     calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
     calculate_pdelta_screening,
+    get_cached_optional_table,
     get_cached_workbook,
     pdelta_combination_options,
     validate_upload_filename,
@@ -482,24 +482,67 @@ asce_percentage = st.sidebar.slider(
     5.0,
 )
 
+optional_upload_groups = (
+    ("الالتواء واللامركزية — الكود العراقي 2019", ("diaphragm_drifts",)),
+    ("فحص P-Delta", ("story_forces",)),
+    (
+        "جداول إضافية للمراجعة",
+        ("diaphragm_displacements", "story_mass", "joint_displacements"),
+    ),
+)
+optional_table_labels = {
+    key: label for key, label, _aliases in OPTIONAL_SHEET_NAMES
+}
+optional_tables = {}
+optional_table_issues = {}
+st.sidebar.markdown("---")
+st.sidebar.header("📎 رفع الجداول الاختيارية")
+st.sidebar.caption(
+    "ارفع ملف Excel منفصلاً لكل جدول، بجانب الفحص المرتبط به. "
+    "تُقرأ الورقة المطلوبة فقط من كل ملف."
+)
+for group_label, table_keys in optional_upload_groups:
+    with st.sidebar.expander(group_label):
+        for table_key in table_keys:
+            table_label = optional_table_labels[table_key]
+            accepted_sheets = next(
+                aliases
+                for key, _label, aliases in OPTIONAL_SHEET_NAMES
+                if key == table_key
+            )
+            st.caption(
+                f"الورقة المطلوبة: `{'` أو `'.join(accepted_sheets)}`"
+            )
+            optional_file = st.file_uploader(
+                f"ملف {table_label} (اختياري)",
+                type=["xlsx"],
+                key=f"optional_upload_{table_key}",
+            )
+            if optional_file is None:
+                st.caption("لم يُرفع هذا الجدول؛ سيبقى الفحص المعتمد عليه غير محسوب.")
+                continue
+            try:
+                _file_hash, optional_table = get_cached_optional_table(
+                    st.session_state, optional_file.getvalue(), table_key
+                )
+                optional_tables[table_key] = optional_table
+            except WorkbookValidationError as exc:
+                optional_table_issues[table_key] = str(exc)
+                st.error(str(exc))
+
 uploaded_file = st.file_uploader(
     "ارفع ملف نتائج ETABS الخام باسم results.xlsx", type=["xlsx"]
 )
 with st.expander("أسماء الأوراق المطلوبة لإجراء الحسابات"):
     st.markdown(
-        "يجب أن يحتوي الملف على الأوراق التالية (تُقبل كتابة الاسم مع اختلاف المسافات أو الشرطة السفلية):"
+        "يجب أن يحتوي الملف الأساسي على الأوراق التالية (تُقبل كتابة الاسم مع اختلاف المسافات أو الشرطة السفلية). "
+        "أي أوراق أخرى داخله تُهمل ولا تُقرأ؛ ارفع الجداول الاختيارية منفصلة من الشريط الجانبي."
     )
     for _key, aliases in REQUIRED_SHEET_NAMES:
         st.markdown(f"- `{ ' أو '.join(aliases) }`")
     st.markdown(
-        "**جداول إضافية اختيارية:** "
-        + "، ".join(f"`{label}`" for _key, label, _aliases in OPTIONAL_SHEET_NAMES)
-        + ". غيابها لا يمنع الفحوص الأساسية، لكنه يقلل البيانات المتاحة للمراجعة."
-    )
-    st.markdown(
-        "**مصادر P-Delta الاختيارية:** "
-        + "، ".join(f"`{name}`" for name in OPTIONAL_PDELTA_SHEETS)
-        + ". يستخدم الفحص هذا الجدول مع `Story Drifts` المطلوب، ويظل غير محسوب حتى اختيار التركيبات وتأكيد معاملاتها وCd وIe."
+        "**الجداول الاختيارية:** تُرفع كل ورقة في ملف مستقل من المجموعة المرتبطة بها في الشريط الجانبي. "
+        "غياب أي ملف لا يمنع التحليل الأساسي، لكنه يترك الفحص المعتمد على ذلك الجدول غير محسوب."
     )
 
 st.markdown("---")
@@ -576,7 +619,7 @@ else:
     if st.session_state.get("upload_blocked"):
         workbook = None
     if workbook is not None:
-        tables = workbook.tables
+        tables = {**workbook.tables, **optional_tables}
         report_findings = []
 
         st.header("1. مراكز الكتلة والصلابة")
@@ -931,14 +974,14 @@ else:
                     )
         else:
             status_dict["Iraqi Torsion"] = "NOT_EVALUATED"
-            issue = workbook.optional_table_issues.get("diaphragm_drifts")
+            issue = optional_table_issues.get("diaphragm_drifts")
             if issue:
                 st.warning(
                     "تعذر استخدام جدول Diaphragm Max Over Avg Drifts: " + issue
                 )
             else:
                 st.info(
-                    "جدول Diaphragm Max Over Avg Drifts غير موجود؛ لا يمكن تقييم "
+                    "لم يُرفع ملف Diaphragm Max Over Avg Drifts؛ لا يمكن تقييم "
                     "نسبة الالتواء العرضي أو Ax."
                 )
         st.caption(
@@ -1020,6 +1063,9 @@ else:
             if "story_forces" in tables
             else []
         )
+        pdelta_source_issue = optional_table_issues.get("story_forces")
+        if pdelta_source_issue is None and "story_forces" not in tables:
+            pdelta_source_issue = "لم يُرفع ملف جدول Story Forces."
         selected_pdelta_combinations = st.multiselect(
             "تركيبات التصميم المعتمدة لفحص P-Delta (يمكن اختيار عدة تركيبات)",
             options=pdelta_options,
@@ -1065,7 +1111,7 @@ else:
             combinations_confirmed=pdelta_combinations_confirmed,
             coefficients_confirmed=pdelta_coefficients_confirmed,
             drift_confirmed=pdelta_drift_confirmed,
-            source_issue=workbook.pdelta_source_issue,
+            source_issue=pdelta_source_issue,
         )
         status_dict["P-Delta Check"] = pdelta["status"]
         if pdelta["status"] in {
@@ -1145,7 +1191,7 @@ else:
                 "أي قيمة إلى صفر ولا يعني اجتياز فحص."
             )
         st.caption(
-            "تعرض هذه الجداول كما وردت في الملف. وجودها يتيح مراجعة بيانات إضافية، "
+            "تعرض هذه الجداول من ملفاتها المنفصلة كما وردت. وجودها يتيح مراجعة بيانات إضافية، "
             "ولا ينشئ فحص نجاح/فشل تلقائياً."
         )
         for key, label, _aliases in OPTIONAL_SHEET_NAMES:
@@ -1153,8 +1199,13 @@ else:
                 with st.expander(f"{label} — متوفر"):
                     st.dataframe(tables[key], width="stretch")
             else:
-                st.info(f"الجدول الاختياري `{label}` غير موجود في الملف المرفوع.")
-                report_findings.append(f"الجدول الاختياري {label}: غير موجود.")
+                issue = optional_table_issues.get(key)
+                if issue:
+                    st.warning(f"تعذر استخدام الجدول الاختياري `{label}`: {issue}")
+                    report_findings.append(f"الجدول الاختياري {label}: تعذر قراءته.")
+                else:
+                    st.info(f"لم يُرفع ملف الجدول الاختياري `{label}`.")
+                    report_findings.append(f"الجدول الاختياري {label}: لم يُرفع.")
 
         render_sidebar_status(status_dict)
 
