@@ -19,8 +19,9 @@ from app.etabs_processing import (
     calculate_iraqi_2019_torsion_eccentricities,
     calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
+    calculate_pdelta_screening,
     get_cached_workbook,
-    pdelta_assessment,
+    pdelta_combination_options,
     validate_upload_filename,
 )
 
@@ -60,6 +61,9 @@ STATUS_LABELS = {
     "NOT_EVALUATED": "غير محسوب ⚠️",
     "ERROR": "خطأ في المدخلات ⚠️",
     "INFORMATIONAL": "معلوماتي — لا يصدر حكم مطابقة",
+    "PDELTA_NEGLIGIBLE": "يمكن إهمال P-Delta حسب الفحص",
+    "PDELTA_REQUIRED": "يجب إدراج P-Delta في التحليل",
+    "PDELTA_LIMIT_EXCEEDED": "تجاوز حد الاستقرار؛ يلزم إجراء هندسي",
 }
 SECTION_NAMES = {
     "Centers Of Mass": "مراكز الكتلة والصلابة",
@@ -200,6 +204,97 @@ def generate_word_report(
         "تنفيذ الحالات أو المعامل فعلياً."
     )
     document.add_paragraph(str(pdelta["message"]))
+    document.add_paragraph(
+        "فحص P-Delta وفق الكود الزلزالي العراقي 2019، الفصل 3، §3-9/7/1: "
+        "معادلة (3-9/12) تستخدم θ = P × Δ / (V × hs × Cd)، ومعادلة "
+        "(3-9/16) تحدد θmax = min(0.25, 0.5/(β × Cd)). بما أن Drift في "
+        "Story Drifts نسبة انجراف مرن بلا وحدة، ومعادلة انجراف التصميم في "
+        "الكود هي Cd × الانجراف المرن / Ie، تختزل معادلة الاستقرار إلى "
+        "θ = P × |Drift| / (|V| × Ie)، مع اعتبار P الموجب ضغطاً. استُخدم "
+        "β = 1.0 تحفظياً كما يسمح الكود. إذا تجاوز θ قيمة θmax فهذه نتيجة "
+        "غير مقبولة بهذا الفحص وتتطلب تحليلاً/مراجعة إنشائية إضافية وفق الكود؛ "
+        "وإلا فـ θ ≤ 0.1 يسمح بإهمال الأثر، و0.1 < θ ≤ θmax "
+        "يتطلب إدراج P-Delta."
+    )
+    document.add_paragraph(
+        "استخدم الحساب صف Location = Bottom من Story Forces، وCase Type = "
+        "Combination فقط، وطابق Output Case حرفيًا مع Story Drifts. استُبعدت "
+        "مخرجات Max/Min وMax_envelope والصفوف ذات Step Number لأنها ليست "
+        "حالة متزامنة صالحة للمقارنة، "
+        "واستخدم أكبر قيمة مطلقة للانجراف بين نقاط الطابق. رُتبت الطوابق بحسب "
+        "منسوب Z تنازليًا. لا يحوي الملف تعريفات معاملات التركيبات، لذا يعتمد "
+        "الحساب على اختيار المستخدم وتأكيده، ولا يتحقق من صلاحية عواملها."
+    )
+    document.add_paragraph(
+        "تُعرض فقط التركيبات التي لها محصلة قص قاعدي جانبية في Base Reactions. "
+        "يُعد اتجاه X/Y مؤثراً إذا تجاوزت قيمة FX/FY المطلقة 1e-6 × |FZ|؛ "
+        "هذه سماحية عددية لتمييز ضوضاء التقريب عن الحمل الجانبي وليست حداً "
+        "للكود العراقي. ويظل الاتجاه الذي لا يحققها غير محسوب، لا ناجحاً."
+    )
+    document.add_paragraph(
+        "التركيبات المختارة: "
+        + (
+            ", ".join(pdelta["selected_combinations"])
+            if pdelta["selected_combinations"]
+            else "لم تُحدد"
+        )
+    )
+    document.add_paragraph(
+        f"تأكيد معاملات التركيبات: {'نعم' if pdelta['combinations_confirmed'] else 'لا'}; "
+        f"تأكيد Cd وIe: {'نعم' if pdelta['coefficients_confirmed'] else 'لا'}; "
+        f"تأكيد أن Drift مرن وغير مكبّر مسبقاً: "
+        f"{'نعم' if pdelta['drift_confirmed'] else 'لا'}."
+    )
+    governing = pdelta.get("governing_results")
+    if isinstance(governing, pd.DataFrame) and not governing.empty:
+        document.add_heading("نتائج P-Delta الحاكمة لكل طابق واتجاه", level=3)
+        pdelta_table = document.add_table(rows=1, cols=11)
+        pdelta_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        headings = (
+            "الطابق",
+            "Z (mm)",
+            "الاتجاه",
+            "التركيبة الحاكمة",
+            "|قص القاعدة|",
+            "P",
+            "|V|",
+            "|Drift|",
+            "θ",
+            "θmax",
+            "التصنيف / السبب",
+        )
+        for cell, heading in zip(pdelta_table.rows[0].cells, headings):
+            cell.text = heading
+        classifications = {
+            "NEGLIGIBLE": "يمكن الإهمال",
+            "INCLUDE_PDELTA": "يجب إدراج P-Delta",
+            "LIMIT_EXCEEDED": "تجاوز θmax",
+            "NOT_EVALUATED": "غير محسوب",
+        }
+        for row in governing.itertuples(index=False):
+            cells = pdelta_table.add_row().cells
+            values = (
+                row.story,
+                f"{row.story_z:.0f}" if pd.notna(row.story_z) else "غير متاح",
+                row.direction,
+                row.output_case,
+                f"{row.base_shear:.5f}"
+                if pd.notna(row.base_shear)
+                else "غير مؤثر/غير محسوب",
+                f"{row.p:.5f}" if pd.notna(row.p) else "غير محسوب",
+                f"{row.story_shear:.5f}"
+                if pd.notna(row.story_shear)
+                else "غير محسوب",
+                f"{row.elastic_drift_ratio:.7f}"
+                if pd.notna(row.elastic_drift_ratio)
+                else "غير محسوب",
+                f"{row.theta:.5f}" if pd.notna(row.theta) else "غير محسوب",
+                f"{row.theta_max:.5f}" if pd.notna(row.theta_max) else "غير متاح",
+                classifications.get(row.classification, row.classification)
+                + (f": {row.reason}" if row.reason else ""),
+            )
+            for cell, value in zip(cells, values):
+                cell.text = str(value)
     for item in pdelta["required_inputs"]:
         document.add_paragraph(item, style="List Bullet")
     document.add_paragraph(
@@ -404,7 +499,7 @@ with st.expander("أسماء الأوراق المطلوبة لإجراء الح
     st.markdown(
         "**مصادر P-Delta الاختيارية:** "
         + "، ".join(f"`{name}`" for name in OPTIONAL_PDELTA_SHEETS)
-        + ". حتى مع وجودها يبقى فحص P-Delta غير محسوب إلى أن تُؤكد معادلة ومدخلات الحالة."
+        + ". يستخدم الفحص هذا الجدول مع `Story Drifts` المطلوب، ويظل غير محسوب حتى اختيار التركيبات وتأكيد معاملاتها وCd وIe."
     )
 
 st.markdown("---")
@@ -727,12 +822,131 @@ else:
         st.markdown("---")
 
         st.header("7. فحص P-Delta")
-        pdelta = pdelta_assessment(workbook.pdelta_source_issue)
+        pdelta_options = (
+            pdelta_combination_options(
+                tables.get("story_forces", pd.DataFrame()),
+                tables.get("story_drifts", pd.DataFrame()),
+                tables.get("base_reactions", pd.DataFrame()),
+            )
+            if "story_forces" in tables
+            else []
+        )
+        selected_pdelta_combinations = st.multiselect(
+            "تركيبات التصميم المعتمدة لفحص P-Delta (يمكن اختيار عدة تركيبات)",
+            options=pdelta_options,
+            key="pdelta_selected_combinations",
+            help=(
+                "تُعرض فقط حالات Combination المشتركة التي لا تحمل مخرجات "
+                "Max/Min أو Envelope أو Step Number. لا يستطيع التطبيق استنتاج معاملات "
+                "التركيبة من اسمها. ويُشترط وجود قص قاعدي جانبي أعلى من 1e-6 "
+                "من |FZ|؛ هذه سماحية عددية وليست حداً للكود."
+            ),
+        )
+        st.caption(
+            "تُستخدم قيم Story Forces عند Bottom والانجراف المطلق الأقصى لكل "
+            "طابق/اتجاه. تُرتب النتائج بحسب منسوب Z من الأعلى إلى الأسفل؛ "
+            "ولا يُستخدم ارتفاع الطابق لأن Drift المصدر نسبة بلا وحدة. تُقبل "
+            "قيمة P الموجبة ضغطاً؛ القيم السالبة أو الصفرية لا تُحسب. تُراجع "
+            "FX/FY في Base Reactions لاستبعاد التركيبات الجاذبية والاتجاهات "
+            "دون حمل جانبي مؤثر؛ السماحية العددية هي 1e-6 × |FZ| وليست حد كود."
+        )
+        pdelta_combinations_confirmed = st.checkbox(
+            "أؤكد أن معاملات التركيبات المختارة تحقق متطلبات الكود العراقي"
+        )
+        pdelta_coefficients_confirmed = st.checkbox(
+            f"أؤكد انطباق Cd = {deflection_cd:g} وIe = {importance_factor:g} على هذه التركيبات"
+        )
+        pdelta_drift_confirmed = st.checkbox(
+            "أؤكد أن قيم Story Drifts.Drift انجراف مرن غير مضروب مسبقاً في Cd/Ie"
+        )
+        st.markdown(
+            "**المعادلة:** θ = P × |Drift| / (|V| × Ie)، بعد اختزال معادلة "
+            "الانجراف التصميمي في الكود العراقي. "
+            "**الحد:** θmax = min(0.25, 0.5/(β × Cd)) مع β = 1.0 تحفظيًا. "
+            "إذا تجاوز θ قيمة θmax فهذا تجاوز لحد الاستقرار؛ وإلا إذا "
+            "θ ≤ 0.1 يمكن إهمال الأثر، وإذا 0.1 < θ ≤ θmax وجب إدراجه."
+        )
+        pdelta = calculate_pdelta_screening(
+            tables.get("story_forces", pd.DataFrame()),
+            tables["story_drifts"],
+            tables.get("base_reactions", pd.DataFrame()),
+            selected_pdelta_combinations,
+            deflection_cd,
+            importance_factor,
+            combinations_confirmed=pdelta_combinations_confirmed,
+            coefficients_confirmed=pdelta_coefficients_confirmed,
+            drift_confirmed=pdelta_drift_confirmed,
+            source_issue=workbook.pdelta_source_issue,
+        )
         status_dict["P-Delta Check"] = pdelta["status"]
-        st.warning(pdelta["message"])
-        st.write("المدخلات/التعريفات المطلوبة قبل إصدار نتيجة:")
-        for item in pdelta["required_inputs"]:
-            st.markdown(f"- {item}")
+        if pdelta["status"] in {
+            "PDELTA_LIMIT_EXCEEDED",
+            "PDELTA_REQUIRED",
+            "INCOMPLETE",
+            "NOT_EVALUATED",
+        }:
+            st.warning(pdelta["message"])
+        else:
+            st.success(pdelta["message"])
+        governing = pdelta["governing_results"]
+        if not governing.empty:
+            display = governing.rename(
+                columns={
+                    "story": "الطابق",
+                    "story_z": "منسوب Z (ملم)",
+                    "direction": "الاتجاه",
+                    "base_shear": "|قص القاعدة|",
+                    "output_case": "التركيبة الحاكمة",
+                    "p": "P عند Bottom",
+                    "story_shear": "|V| عند Bottom",
+                    "elastic_drift_ratio": "أقصى |Drift| مرن",
+                    "theta": "θ",
+                    "theta_max": "θmax",
+                    "classification": "قرار الكود",
+                    "reason": "سبب عدم الحساب",
+                }
+            )
+            display["قرار الكود"] = display["قرار الكود"].map(
+                {
+                    "NEGLIGIBLE": "يمكن الإهمال (θ ≤ 0.1)",
+                    "INCLUDE_PDELTA": "يجب إدراج P-Delta",
+                    "LIMIT_EXCEEDED": "تجاوز θmax",
+                    "NOT_EVALUATED": "غير محسوب",
+                }
+            )
+            st.dataframe(
+                display[
+                    [
+                        "الطابق",
+                        "منسوب Z (ملم)",
+                        "الاتجاه",
+                        "التركيبة الحاكمة",
+                        "|قص القاعدة|",
+                        "P عند Bottom",
+                        "|V| عند Bottom",
+                        "أقصى |Drift| مرن",
+                        "θ",
+                        "θmax",
+                        "قرار الكود",
+                        "سبب عدم الحساب",
+                    ]
+                ].round(6),
+                width="stretch",
+            )
+            for row in governing.itertuples(index=False):
+                if pd.notna(row.theta):
+                    report_findings.append(
+                        f"P-Delta — {row.story}، الاتجاه {row.direction}، "
+                        f"التركيبة الحاكمة {row.output_case}: θ = {row.theta:.5f} "
+                        f"مقابل θmax = {row.theta_max:.5f} "
+                        f"({row.classification})."
+                    )
+            with st.expander("تفاصيل جميع التركيبات المختارة"):
+                st.dataframe(pdelta["results"], width="stretch")
+        if pdelta["required_inputs"]:
+            st.write("متطلبات/تنبيهات الفحص:")
+            for item in pdelta["required_inputs"]:
+                st.markdown(f"- {item}")
         st.markdown("---")
         st.header("8. جداول ETABS الإضافية")
         st.caption(
