@@ -13,11 +13,13 @@ from app.etabs_processing import (
     calculate_iraqi_2019_torsion_eccentricities,
     calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
+    calculate_pdelta_screening,
     get_cached_workbook,
     load_etabs_workbook,
     MAX_CACHED_WORKBOOK_VERSIONS,
     missing_optional_sheets,
     missing_required_sheets,
+    pdelta_combination_options,
     pdelta_assessment,
     validate_upload_filename,
 )
@@ -145,7 +147,7 @@ class EtabsProcessingTests(unittest.TestCase):
             )
         )
         self.assertIn("Story Forces", workbook.pdelta_source_issue)
-        self.assertIn("Diaphragm CM Displacements", workbook.pdelta_source_issue)
+        self.assertNotIn("Diaphragm CM Displacements", workbook.pdelta_source_issue)
         self.assertIn("base_reactions", workbook.tables)
         self.assertIn("Story Masses", workbook.missing_optional_sheets)
         self.assertIn("Joint Displacements", workbook.missing_optional_sheets)
@@ -453,7 +455,342 @@ class EtabsProcessingTests(unittest.TestCase):
         result = pdelta_assessment()
         self.assertEqual(result["status"], "NOT_EVALUATED")
         self.assertTrue(result["required_inputs"])
-        self.assertIn("مراجع خارجية مكسورة", result["message"])
+        self.assertIn("اختر تركيبات التصميم", result["message"])
+
+    def build_pdelta_tables(self, *, p=1000, vx=-500, vy=-500, drifts=None):
+        force_rows = []
+        drift_rows = []
+        drift_values = drifts or {"Story1": (0.01, 0.01)}
+        elevations = {"Story1": 3500, "Story2": 7000}
+        for story, (drift_x, drift_y) in drift_values.items():
+            force_rows.extend(
+                [
+                    {
+                        "story": story,
+                        "output_case": "Design Combo",
+                        "case_type": "Combination",
+                        "step_type": None,
+                        "step_number": None,
+                        "location": "Top",
+                        "p": p + 10000,
+                        "vx": vx * 10,
+                        "vy": vy * 10,
+                    },
+                    {
+                        "story": story,
+                        "output_case": "Design Combo",
+                        "case_type": "Combination",
+                        "step_type": None,
+                        "step_number": None,
+                        "location": "Bottom",
+                        "p": p,
+                        "vx": vx,
+                        "vy": vy,
+                    },
+                ]
+            )
+            for direction, drift in (("X", drift_x), ("Y", drift_y)):
+                drift_rows.append(
+                    {
+                        "story": story,
+                        "output_case": "Design Combo",
+                        "case_type": "Combination",
+                        "step_type": None,
+                        "step_number": None,
+                        "direction": direction,
+                        "drift": drift,
+                        "z": elevations[story],
+                    }
+                )
+        base_reactions = pd.DataFrame(
+            [
+                {
+                    "output_case": "Design Combo",
+                    "case_type": "Combination",
+                    "step_type": None,
+                    "step_number": None,
+                    "fx": 500.0,
+                    "fy": 500.0,
+                    "fz": abs(p),
+                }
+            ]
+        )
+        return (
+            pd.DataFrame(force_rows),
+            pd.DataFrame(drift_rows),
+            base_reactions,
+        )
+
+    def calculate_test_pdelta(
+        self,
+        forces,
+        drifts,
+        base_reactions,
+        combinations=("Design Combo",),
+        *,
+        cd=4.0,
+        ie=1.0,
+        combinations_confirmed=True,
+        coefficients_confirmed=True,
+    ):
+        return calculate_pdelta_screening(
+            forces,
+            drifts,
+            base_reactions,
+            combinations,
+            cd,
+            ie,
+            combinations_confirmed=combinations_confirmed,
+            coefficients_confirmed=coefficients_confirmed,
+            drift_confirmed=True,
+        )
+
+    def test_pdelta_formula_uses_elastic_drift_ratio_and_ie(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables(
+            p=1000, vx=-500, drifts={"Story1": (0.0625, 0.01)}
+        )
+        result = self.calculate_test_pdelta(
+            forces, drifts, base_reactions, ie=1.25
+        )
+        row = result["results"].query("direction == 'X'").iloc[0]
+        self.assertAlmostEqual(row["theta"], 0.1)
+        self.assertAlmostEqual(row["theta_max"], 0.125)
+        self.assertEqual(row["classification"], "NEGLIGIBLE")
+        self.assertEqual(row["p"], 1000)
+        self.assertEqual(row["story_shear"], 500)
+        self.assertEqual(result["required_inputs"], [])
+
+    def test_pdelta_threshold_boundaries(self):
+        for drift, expected in (
+            (0.05, "NEGLIGIBLE"),
+            (0.0625, "INCLUDE_PDELTA"),
+            (0.0625001, "LIMIT_EXCEEDED"),
+        ):
+            with self.subTest(drift=drift):
+                forces, drifts, base_reactions = self.build_pdelta_tables(
+                    p=1000, vx=-500, drifts={"Story1": (drift, 0.01)}
+                )
+                result = self.calculate_test_pdelta(
+                    forces, drifts, base_reactions
+                )
+                row = result["results"].query("direction == 'X'").iloc[0]
+                self.assertEqual(row["classification"], expected)
+
+    def test_pdelta_limit_is_checked_even_when_below_neglect_threshold(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables(
+            p=1000, vx=-500, drifts={"Story1": (0.0475, 0.01)}
+        )
+        result = self.calculate_test_pdelta(
+            forces, drifts, base_reactions, cd=5.5
+        )
+        row = result["results"].query("direction == 'X'").iloc[0]
+        self.assertAlmostEqual(row["theta"], 0.095)
+        self.assertLess(row["theta"], 0.1)
+        self.assertGreater(row["theta"], row["theta_max"])
+        self.assertEqual(row["classification"], "LIMIT_EXCEEDED")
+
+    def test_pdelta_does_not_evaluate_nonpositive_axial_load_or_zero_shear(self):
+        for p, vx, expected_reason in (
+            (-100, -500, "P غير موجب"),
+            (1000, 0, "قص الطابق صفري"),
+        ):
+            with self.subTest(p=p, vx=vx):
+                forces, drifts, base_reactions = self.build_pdelta_tables(
+                    p=p, vx=vx, drifts={"Story1": (0.0, 0.01)}
+                )
+                result = self.calculate_test_pdelta(
+                    forces, drifts, base_reactions
+                )
+                row = result["results"].query("direction == 'X'").iloc[0]
+                self.assertEqual(row["classification"], "NOT_EVALUATED")
+                self.assertIn(expected_reason, row["reason"])
+
+    def test_pdelta_does_not_turn_missing_drift_into_zero(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        drifts = drifts[drifts["direction"] != "X"]
+        result = self.calculate_test_pdelta(forces, drifts, base_reactions)
+        row = result["results"].query("direction == 'X'").iloc[0]
+        self.assertEqual(row["classification"], "NOT_EVALUATED")
+        self.assertIn("لا يوجد انجراف", row["reason"])
+        self.assertTrue(pd.isna(row["theta"]))
+
+    def test_pdelta_conflicting_bottom_force_duplicates_are_not_evaluated(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        conflicting = forces[
+            (forces["story"] == "Story1") & (forces["location"] == "Bottom")
+        ].iloc[0].copy()
+        conflicting["p"] = 1200
+        forces = pd.concat([forces, conflicting.to_frame().T], ignore_index=True)
+        result = self.calculate_test_pdelta(forces, drifts, base_reactions)
+        row = result["results"].query("direction == 'X'").iloc[0]
+        self.assertEqual(row["classification"], "NOT_EVALUATED")
+        self.assertIn("متعارضة", row["reason"])
+
+    def test_pdelta_filters_max_min_and_envelope_outputs(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        forces = pd.concat(
+            [
+                forces,
+                forces.assign(output_case="Max_envelope"),
+                forces.assign(output_case="Max output", step_type="Max"),
+                forces.assign(output_case="Stepped output", step_number=1),
+                forces.assign(output_case="Static Case", case_type="LinStatic"),
+            ],
+            ignore_index=True,
+        )
+        drifts = pd.concat(
+            [
+                drifts,
+                drifts.assign(output_case="Max_envelope"),
+                drifts.assign(output_case="Min output", step_type="Min"),
+                drifts.assign(output_case="Stepped output", step_number=1),
+                drifts.assign(output_case="Static Case", case_type="LinStatic"),
+            ],
+            ignore_index=True,
+        )
+        self.assertEqual(
+            pdelta_combination_options(forces, drifts, base_reactions),
+            ["Design Combo"],
+        )
+
+    def test_pdelta_requires_exact_matching_output_case_names(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        drifts["output_case"] = "Different Combo"
+        self.assertEqual(
+            pdelta_combination_options(forces, drifts, base_reactions), []
+        )
+
+    def test_pdelta_excludes_gravity_only_combinations_and_marks_inactive_direction(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        base_reactions.loc[:, ["fx", "fy"]] = 1e-8
+        options = pdelta_combination_options(forces, drifts, base_reactions)
+        self.assertEqual(options, [])
+        result = calculate_pdelta_screening(
+            forces,
+            drifts,
+            base_reactions,
+            [],
+            4.0,
+            1.0,
+            combinations_confirmed=False,
+            coefficients_confirmed=False,
+            drift_confirmed=False,
+        )
+        self.assertEqual(result["status"], "NOT_EVALUATED")
+        self.assertIn("لا توجد تركيبات", result["message"])
+
+    def test_pdelta_uses_base_reaction_to_screen_each_direction(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        base_reactions.loc[:, "fx"] = 500.0
+        base_reactions.loc[:, "fy"] = 1e-8
+        result = self.calculate_test_pdelta(forces, drifts, base_reactions)
+        x_row = result["results"].query("direction == 'X'").iloc[0]
+        y_row = result["results"].query("direction == 'Y'").iloc[0]
+        self.assertEqual(x_row["classification"], "NEGLIGIBLE")
+        self.assertEqual(y_row["classification"], "NOT_EVALUATED")
+        self.assertIn("قص قاعدي", y_row["reason"])
+        self.assertEqual(x_row["base_shear"], 500.0)
+
+    def test_pdelta_accepts_separate_directional_combinations_without_false_incomplete_status(self):
+        x_forces, x_drifts, x_base = self.build_pdelta_tables()
+        y_forces, y_drifts, y_base = self.build_pdelta_tables()
+        for table in (x_forces, x_drifts, x_base):
+            table.loc[:, "output_case"] = "X Combo"
+        for table in (y_forces, y_drifts, y_base):
+            table.loc[:, "output_case"] = "Y Combo"
+        x_base.loc[:, ["fx", "fy"]] = [500.0, 1e-8]
+        y_base.loc[:, ["fx", "fy"]] = [1e-8, 500.0]
+        forces = pd.concat([x_forces, y_forces], ignore_index=True)
+        drifts = pd.concat([x_drifts, y_drifts], ignore_index=True)
+        base_reactions = pd.concat([x_base, y_base], ignore_index=True)
+
+        result = self.calculate_test_pdelta(
+            forces, drifts, base_reactions, ("X Combo", "Y Combo")
+        )
+
+        self.assertEqual(result["status"], "PDELTA_NEGLIGIBLE")
+        self.assertFalse(result["results"]["theta"].isna().any())
+        self.assertEqual(
+            set(result["governing_results"]["output_case"]),
+            {"X Combo", "Y Combo"},
+        )
+
+    def test_pdelta_uses_max_absolute_drift_and_sorts_by_elevation(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables(
+            drifts={"Story1": (0.01, 0.01), "Story2": (0.02, 0.01)}
+        )
+        duplicate = drifts[
+            (drifts["story"] == "Story1") & (drifts["direction"] == "X")
+        ].copy()
+        duplicate["drift"] = -0.03
+        drifts = pd.concat([drifts, duplicate], ignore_index=True)
+        result = self.calculate_test_pdelta(forces, drifts, base_reactions)
+        self.assertEqual(
+            result["results"]["story"].drop_duplicates().tolist(),
+            ["Story2", "Story1"],
+        )
+        story1_x = result["results"].query(
+            "story == 'Story1' and direction == 'X'"
+        ).iloc[0]
+        self.assertAlmostEqual(story1_x["elastic_drift_ratio"], 0.03)
+        self.assertEqual(
+            result["governing_results"]["story"].drop_duplicates().tolist(),
+            ["Story2", "Story1"],
+        )
+
+    def test_pdelta_reports_worst_selected_combination_per_story_and_direction(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        more_forces, more_drifts, more_base_reactions = self.build_pdelta_tables(
+            drifts={"Story1": (0.05, 0.01)}
+        )
+        more_forces["output_case"] = "Second Combo"
+        more_drifts["output_case"] = "Second Combo"
+        more_base_reactions["output_case"] = "Second Combo"
+        forces = pd.concat([forces, more_forces], ignore_index=True)
+        drifts = pd.concat([drifts, more_drifts], ignore_index=True)
+        base_reactions = pd.concat(
+            [base_reactions, more_base_reactions], ignore_index=True
+        )
+        result = self.calculate_test_pdelta(
+            forces,
+            drifts,
+            base_reactions,
+            ("Design Combo", "Second Combo"),
+        )
+        row = result["governing_results"].query(
+            "story == 'Story1' and direction == 'X'"
+        ).iloc[0]
+        self.assertEqual(row["output_case"], "Second Combo")
+        self.assertAlmostEqual(row["theta"], 0.1)
+
+    def test_pdelta_requires_user_confirmation_of_combinations_and_coefficients(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        result = self.calculate_test_pdelta(
+            forces,
+            drifts,
+            base_reactions,
+            coefficients_confirmed=False,
+        )
+        self.assertEqual(result["status"], "NOT_EVALUATED")
+        self.assertTrue(result["results"].empty)
+        self.assertIn("تأكيد انطباق Cd وIe", result["message"])
+
+    def test_pdelta_requires_confirmation_that_drift_is_unamplified_elastic_ratio(self):
+        forces, drifts, base_reactions = self.build_pdelta_tables()
+        result = calculate_pdelta_screening(
+            forces,
+            drifts,
+            base_reactions,
+            ["Design Combo"],
+            4.0,
+            1.0,
+            combinations_confirmed=True,
+            coefficients_confirmed=True,
+            drift_confirmed=False,
+        )
+        self.assertEqual(result["status"], "NOT_EVALUATED")
+        self.assertTrue(result["results"].empty)
+        self.assertIn("Drift مرن", result["message"])
 
 
 if __name__ == "__main__":

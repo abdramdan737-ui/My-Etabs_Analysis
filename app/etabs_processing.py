@@ -32,6 +32,7 @@ REQUIRED_SHEETS = {
 REQUIRED_SHEET_NAMES = tuple(
     (key, aliases) for key, aliases in REQUIRED_SHEETS.items()
 )
+PDELTA_BASE_SHEAR_RELATIVE_TOLERANCE = 1e-6
 
 OPTIONAL_TABLES = {
     "story_forces": {
@@ -45,7 +46,7 @@ OPTIONAL_TABLES = {
             "Diaphragm CM Displacements",
             "Diaphragm Center Of Mass Displacements",
         ),
-        "pdelta_source": True,
+        "pdelta_source": False,
     },
     "story_mass": {
         "label": "Story Masses",
@@ -152,6 +153,26 @@ COLUMNS = {
     },
 }
 
+OPTIONAL_COLUMNS = {
+    "base_reactions": {
+        "case_type": ("Case Type",),
+        "step_type": ("Step Type",),
+        "step_number": ("Step Number",),
+        "fz": ("FZ", "F_Z"),
+    },
+    "story_drifts": {
+        "case_type": ("Case Type",),
+        "step_type": ("Step Type",),
+        "step_number": ("Step Number",),
+        "z": ("Z",),
+    },
+    "story_forces": {
+        "case_type": ("Case Type",),
+        "step_type": ("Step Type",),
+        "step_number": ("Step Number",),
+    },
+}
+
 
 def _normalized_name(value: object) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).casefold())
@@ -235,7 +256,10 @@ def _find_column(columns: list[object], aliases: tuple[str, ...]) -> object | No
 
 
 def _canonicalize_table(
-    frame: pd.DataFrame, table_name: str, required_columns: dict[str, tuple[str, ...]]
+    frame: pd.DataFrame,
+    table_name: str,
+    required_columns: dict[str, tuple[str, ...]],
+    optional_columns: dict[str, tuple[str, ...]] | None = None,
 ) -> pd.DataFrame:
     frame = frame.dropna(how="all").copy()
     frame.columns = [str(column).strip() for column in frame.columns]
@@ -246,6 +270,10 @@ def _canonicalize_table(
         if column is None:
             missing.append(f"{canonical} ({' / '.join(aliases)})")
         else:
+            renames[column] = canonical
+    for canonical, aliases in (optional_columns or {}).items():
+        column = _find_column(list(frame.columns), aliases)
+        if column is not None:
             renames[column] = canonical
     if missing:
         raise WorkbookValidationError(
@@ -307,7 +335,10 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
                 excel, sheet_name=sheet_name, skiprows=[0, 2], header=0
             )
             tables[key] = _canonicalize_table(
-                raw_frame, sheet_name, COLUMNS.get(key, {})
+                raw_frame,
+                sheet_name,
+                COLUMNS.get(key, {}),
+                OPTIONAL_COLUMNS.get(key, {}),
             )
         except WorkbookValidationError as exc:
             if key in REQUIRED_SHEETS:
@@ -772,10 +803,527 @@ def calculate_iraqi_2019_torsional_irregularity(
     return result, status
 
 
+PDELTA_RESULT_COLUMNS = (
+    "story",
+    "story_z",
+    "direction",
+    "base_shear",
+    "output_case",
+    "p",
+    "story_shear",
+    "elastic_drift_ratio",
+    "cd",
+    "ie",
+    "beta",
+    "theta",
+    "theta_max",
+    "classification",
+    "reason",
+)
+
+
+def _clean_text(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _usable_pdelta_rows(table: pd.DataFrame) -> pd.DataFrame:
+    required = {"output_case", "case_type", "step_type", "step_number"}
+    if table is None or not required.issubset(table.columns):
+        return pd.DataFrame()
+    result = table.copy()
+    case_types = result["case_type"].map(_clean_text).str.casefold()
+    step_types = result["step_type"].map(_clean_text)
+    step_numbers = result["step_number"].map(_clean_text)
+    output_cases = result["output_case"].map(_clean_text)
+    return result[
+        (case_types == "combination")
+        & (step_types == "")
+        & (step_numbers == "")
+        & ~output_cases.str.contains("envelope", case=False, regex=False)
+        & (output_cases != "")
+    ].copy()
+
+
+def _pdelta_base_shears(base_reactions: pd.DataFrame) -> dict[str, dict[str, float]]:
+    required = {"output_case", "case_type", "step_type", "step_number", "fx", "fy", "fz"}
+    if base_reactions is None or not required.issubset(base_reactions.columns):
+        return {}
+    rows = _usable_pdelta_rows(base_reactions)
+    if rows.empty:
+        return {}
+    results: dict[str, dict[str, float]] = {}
+    for case, group in rows.groupby(rows["output_case"].map(_clean_text), sort=False):
+        if not case or len(group) != 1:
+            continue
+        values = group.loc[:, ("fx", "fy", "fz")].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        vector = values.to_numpy(dtype=float)
+        if not np.isfinite(vector).all():
+            continue
+        fx, fy, fz = (float(value) for value in vector[0])
+        numerical_tolerance = abs(fz) * PDELTA_BASE_SHEAR_RELATIVE_TOLERANCE
+        active = {}
+        if abs(fx) > numerical_tolerance:
+            active["X"] = abs(fx)
+        if abs(fy) > numerical_tolerance:
+            active["Y"] = abs(fy)
+        if active:
+            results[case] = active
+    return results
+
+
+def pdelta_combination_options(
+    story_forces: pd.DataFrame,
+    story_drifts: pd.DataFrame,
+    base_reactions: pd.DataFrame,
+) -> list[str]:
+    force_rows = _usable_pdelta_rows(story_forces)
+    drift_rows = _usable_pdelta_rows(story_drifts)
+    active_base_reactions = _pdelta_base_shears(base_reactions)
+    if force_rows.empty or drift_rows.empty or not active_base_reactions:
+        return []
+
+    drift_cases = set(drift_rows["output_case"].map(_clean_text))
+    return [
+        case
+        for case in dict.fromkeys(force_rows["output_case"].map(_clean_text))
+        if case in drift_cases and case in active_base_reactions
+    ]
+
+
+def _numeric_values(frame: pd.DataFrame, column: str) -> pd.Series:
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def _single_force_record(
+    rows: pd.DataFrame, value_columns: tuple[str, ...]
+) -> tuple[dict[str, float] | None, str | None]:
+    if rows.empty:
+        return None, "لا يوجد صف قوة مطابق عند Location = Bottom."
+    missing_columns = [column for column in value_columns if column not in rows]
+    if missing_columns:
+        return None, "أعمدة القوة المطلوبة غير متاحة: " + ", ".join(missing_columns)
+
+    numeric = rows.loc[:, value_columns].apply(pd.to_numeric, errors="coerce")
+    values = numeric.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        return None, "قيمة P أو القص مفقودة أو غير رقمية في مصدر القوى."
+    if not np.allclose(values, values[0], rtol=1e-8, atol=1e-6):
+        return None, "صفوف القوة المكررة عند Bottom متعارضة؛ لم تُدمج."
+    return {
+        column: float(numeric.iloc[0][column]) for column in value_columns
+    }, None
+
+
+def _story_elevations(drift_rows: pd.DataFrame) -> dict[str, float]:
+    if "z" not in drift_rows:
+        return {}
+    elevations: dict[str, float] = {}
+    for story, rows in drift_rows.groupby(
+        drift_rows["story"].map(_clean_text), sort=False
+    ):
+        values = _numeric_values(rows, "z").dropna()
+        if not values.empty and np.isfinite(values.to_numpy(dtype=float)).all():
+            elevations[story] = float(values.max())
+    return elevations
+
+
+def calculate_pdelta_screening(
+    story_forces: pd.DataFrame,
+    story_drifts: pd.DataFrame,
+    base_reactions: pd.DataFrame,
+    selected_combinations: list[str] | tuple[str, ...],
+    cd: float,
+    ie: float,
+    *,
+    combinations_confirmed: bool,
+    coefficients_confirmed: bool,
+    drift_confirmed: bool,
+    source_issue: str | None = None,
+    beta: float = 1.0,
+) -> dict[str, object]:
+    required_inputs = [
+        "اختر تركيبة تصميم واحدة أو أكثر من الحالات المشتركة بين Story Forces وStory Drifts.",
+        "أكد أن معاملات الأحمال في التركيبات المختارة تحقق متطلبات الكود؛ لا يمكن التحقق منها من اسم التركيبة فقط.",
+        "أكد أن Cd وIe المحددين للنظام الإنشائي المختار ينطبقان على التركيبات المختارة.",
+        "أكد أن Story Drifts.Drift يمثل نسبة انجراف مرن غير مضروبة مسبقاً في Cd/Ie.",
+        "تحقق التطبيق من وجود محصلة قص قاعدي جانبية تتجاوز ضوضاء التقريب قبل قبول التركيبة.",
+    ]
+    base = {
+        "status": "NOT_EVALUATED",
+        "message": "غير محسوب: لم تُحدد بعد جميع مدخلات وفحوص P-Delta المطلوبة.",
+        "required_inputs": required_inputs,
+        "selected_combinations": list(selected_combinations or ()),
+        "combinations_confirmed": combinations_confirmed,
+        "coefficients_confirmed": coefficients_confirmed,
+        "drift_confirmed": drift_confirmed,
+        "cd": None,
+        "ie": None,
+        "beta": None,
+        "theta_max": None,
+        "results": pd.DataFrame(columns=PDELTA_RESULT_COLUMNS),
+        "governing_results": pd.DataFrame(columns=PDELTA_RESULT_COLUMNS),
+    }
+
+    if source_issue:
+        base["message"] = f"غير محسوب: مصدر P-Delta غير متاح أو غير صالح: {source_issue}."
+        return base
+    options = pdelta_combination_options(
+        story_forces, story_drifts, base_reactions
+    )
+    if not selected_combinations:
+        missing_case_metadata = any(
+            not {
+                "output_case",
+                "case_type",
+                "step_type",
+                "step_number",
+            }.issubset(table.columns)
+            for table in (story_forces, story_drifts)
+        )
+        missing_case_metadata = missing_case_metadata or not {
+            "output_case",
+            "case_type",
+            "step_type",
+            "step_number",
+            "fx",
+            "fy",
+            "fz",
+        }.issubset(base_reactions.columns)
+        if missing_case_metadata:
+            base["message"] = (
+                "غير محسوب: يلزم وجود أعمدة Output Case وCase Type وStep Type "
+                "وStep Number في الجداول، وFX/FY/FZ في Base Reactions للتحقق "
+                "من وجود حمل جانبي فعلي."
+            )
+        elif not options:
+            base["message"] = (
+                "غير محسوب: لا توجد تركيبات Combination مشتركة ذات محصلة قص "
+                "قاعدي جانبية فعلية بين الجداول الثلاثة؛ تُستبعد تركيبات الجاذبية "
+                "والقيم التي لا تتجاوز 1e-6 من محصلة FZ كضوضاء تقريب."
+            )
+        return base
+    if not combinations_confirmed or not coefficients_confirmed or not drift_confirmed:
+        missing_confirmations = []
+        if not combinations_confirmed:
+            missing_confirmations.append("تأكيد معاملات التركيبات المختارة")
+        if not coefficients_confirmed:
+            missing_confirmations.append("تأكيد انطباق Cd وIe")
+        if not drift_confirmed:
+            missing_confirmations.append("تأكيد أن Drift مرن وغير مكبّر مسبقاً")
+        base["message"] = (
+            "غير محسوب: يلزم " + " و".join(missing_confirmations) + "."
+        )
+        return base
+
+    try:
+        cd_value = _positive_number(cd, "Cd")
+        ie_value = _positive_number(ie, "Ie")
+        beta_value = _positive_number(beta, "β")
+    except WorkbookValidationError as exc:
+        base["message"] = f"غير محسوب: {exc}"
+        return base
+
+    invalid_cases = [
+        case for case in selected_combinations if case not in options
+    ]
+    if invalid_cases:
+        base["message"] = (
+            "غير محسوب: التركيبات التالية لا تحتوي بيانات Combination متطابقة "
+            "غير مغلّفة مع قص قاعدي جانبي مؤثر في الجداول المطلوبة: "
+            + ", ".join(map(str, invalid_cases))
+            + "."
+        )
+        return base
+
+    required_force_columns = {
+        "story",
+        "output_case",
+        "case_type",
+        "step_type",
+        "step_number",
+        "location",
+        "p",
+        "vx",
+        "vy",
+    }
+    required_drift_columns = {
+        "story",
+        "output_case",
+        "case_type",
+        "step_type",
+        "step_number",
+        "direction",
+        "drift",
+    }
+    required_base_columns = {
+        "output_case",
+        "case_type",
+        "step_type",
+        "step_number",
+        "fx",
+        "fy",
+        "fz",
+    }
+    if not required_force_columns.issubset(story_forces.columns):
+        base["message"] = (
+            "غير محسوب: أعمدة Story Forces اللازمة للحساب غير مكتملة."
+        )
+        return base
+    if not required_drift_columns.issubset(story_drifts.columns):
+        base["message"] = (
+            "غير محسوب: أعمدة Story Drifts اللازمة للحساب غير مكتملة."
+        )
+        return base
+    if not required_base_columns.issubset(base_reactions.columns):
+        base["message"] = (
+            "غير محسوب: أعمدة Base Reactions اللازمة للتحقق من القص الجانبي غير مكتملة."
+        )
+        return base
+
+    force_rows = _usable_pdelta_rows(story_forces)
+    drift_rows = _usable_pdelta_rows(story_drifts)
+    base_shears = _pdelta_base_shears(base_reactions)
+    force_rows["_story_key"] = force_rows["story"].map(_clean_text)
+    force_rows["_case_key"] = force_rows["output_case"].map(_clean_text)
+    force_rows["_location_key"] = force_rows["location"].map(_clean_text).str.casefold()
+    drift_rows["_story_key"] = drift_rows["story"].map(_clean_text)
+    drift_rows["_case_key"] = drift_rows["output_case"].map(_clean_text)
+    drift_rows["_direction_key"] = drift_rows["direction"].map(_clean_text).str.upper()
+    selected_drift_rows = drift_rows[
+        drift_rows["_case_key"].isin(selected_combinations)
+    ]
+    elevations = _story_elevations(selected_drift_rows)
+    theta_max = min(0.25, 0.5 / (beta_value * cd_value))
+    selected_base_shears = {
+        case: base_shears.get(case, {}) for case in selected_combinations
+    }
+    active_directions = {
+        direction
+        for case_shears in selected_base_shears.values()
+        for direction in case_shears
+    }
+
+    stories_by_case: dict[str, list[str]] = {}
+    for case in selected_combinations:
+        stories = set(
+            force_rows.loc[force_rows["_case_key"] == case, "_story_key"]
+        ) | set(drift_rows.loc[drift_rows["_case_key"] == case, "_story_key"])
+        stories_by_case[case] = sorted(
+            stories,
+            key=lambda story: (
+                story not in elevations,
+                -elevations.get(story, 0.0),
+                story.casefold(),
+            ),
+        )
+
+    rows = []
+    for case in selected_combinations:
+        for story in stories_by_case[case]:
+            matching_forces = force_rows[
+                (force_rows["_case_key"] == case)
+                & (force_rows["_story_key"] == story)
+                & (force_rows["_location_key"] == "bottom")
+            ]
+            force_values, force_issue = _single_force_record(
+                matching_forces, ("p", "vx", "vy")
+            )
+            matching_drifts = drift_rows[
+                (drift_rows["_case_key"] == case)
+                & (drift_rows["_story_key"] == story)
+                & drift_rows["_direction_key"].isin(("X", "Y"))
+            ]
+
+            for direction, shear_column in (("X", "vx"), ("Y", "vy")):
+                base_shear = base_shears.get(case, {}).get(direction, np.nan)
+                if pd.isna(base_shear):
+                    continue
+                direction_drifts = matching_drifts[
+                    matching_drifts["_direction_key"] == direction
+                ]
+                reasons = []
+                theta = np.nan
+                p_value = np.nan
+                shear_value = np.nan
+                drift_value = np.nan
+
+                if force_issue:
+                    reasons.append(force_issue)
+                elif force_values is not None:
+                    p_value = force_values["p"]
+                    shear_value = abs(force_values[shear_column])
+                    if p_value <= 0:
+                        reasons.append("P غير موجب؛ لا يُفترض أن قيمته صفر ضغط.")
+                    if shear_value <= 0:
+                        reasons.append("قص الطابق صفري؛ لا يمكن حساب θ.")
+
+                if direction_drifts.empty:
+                    reasons.append(f"لا يوجد انجراف مطابق للاتجاه {direction}.")
+                elif direction_drifts["drift"].isna().any():
+                    reasons.append("قيمة انجراف مفقودة أو غير رقمية.")
+                else:
+                    drift_values = _numeric_values(direction_drifts, "drift")
+                    if not np.isfinite(drift_values.to_numpy(dtype=float)).all():
+                        reasons.append("قيمة انجراف غير منتهية.")
+                    else:
+                        drift_value = float(drift_values.abs().max())
+
+                classification = "NOT_EVALUATED"
+                if not reasons and p_value > 0 and shear_value > 0:
+                    theta = p_value * drift_value / (shear_value * ie_value)
+                    if not np.isfinite(theta):
+                        theta = np.nan
+                        reasons.append("تعذر حساب θ كقيمة منتهية.")
+                    elif theta > theta_max:
+                        classification = "LIMIT_EXCEEDED"
+                    elif theta <= 0.1:
+                        classification = "NEGLIGIBLE"
+                    else:
+                        classification = "INCLUDE_PDELTA"
+                rows.append(
+                    {
+                        "story": story,
+                        "story_z": elevations.get(story, np.nan),
+                        "direction": direction,
+                        "base_shear": base_shear,
+                        "output_case": case,
+                        "p": p_value,
+                        "story_shear": shear_value,
+                        "elastic_drift_ratio": drift_value,
+                        "cd": cd_value,
+                        "ie": ie_value,
+                        "beta": beta_value,
+                        "theta": theta,
+                        "theta_max": theta_max,
+                        "classification": classification,
+                        "reason": "؛ ".join(reasons),
+                    }
+                )
+
+    missing_directions = {"X", "Y"} - active_directions
+    all_stories = dict.fromkeys(
+        story for case_stories in stories_by_case.values() for story in case_stories
+    )
+    for direction in sorted(missing_directions):
+        for story in all_stories:
+            rows.append(
+                {
+                    "story": story,
+                    "story_z": elevations.get(story, np.nan),
+                    "direction": direction,
+                    "base_shear": np.nan,
+                    "output_case": "",
+                    "p": np.nan,
+                    "story_shear": np.nan,
+                    "elastic_drift_ratio": np.nan,
+                    "cd": cd_value,
+                    "ie": ie_value,
+                    "beta": beta_value,
+                    "theta": np.nan,
+                    "theta_max": theta_max,
+                    "classification": "NOT_EVALUATED",
+                    "reason": (
+                        f"لا تتضمن التركيبات المختارة محصلة قص قاعدي مؤثرة "
+                        f"في الاتجاه {direction}؛ هذا الاتجاه غير محسوب."
+                    ),
+                }
+            )
+
+    results = pd.DataFrame(rows, columns=PDELTA_RESULT_COLUMNS)
+    if results.empty:
+        base["message"] = "غير محسوب: لم توجد طوابق مشتركة في التركيبات المختارة."
+        return base
+
+    results["_valid"] = results["theta"].notna()
+    governing_rows = []
+    for (story, direction), group in results.groupby(
+        ["story", "direction"], sort=False
+    ):
+        valid = group[group["_valid"]]
+        if valid.empty:
+            governing_rows.append(group.iloc[0].drop(labels="_valid").to_dict())
+            continue
+        governing_rows.append(
+            valid.loc[valid["theta"].idxmax()].drop(labels="_valid").to_dict()
+        )
+    governing = pd.DataFrame(governing_rows, columns=PDELTA_RESULT_COLUMNS)
+    governing["_sort_z"] = pd.to_numeric(governing["story_z"], errors="coerce")
+    governing = governing.sort_values(
+        ["_sort_z", "story", "direction"],
+        ascending=[False, True, True],
+        na_position="last",
+    ).drop(columns="_sort_z").reset_index(drop=True)
+    results["_sort_z"] = pd.to_numeric(results["story_z"], errors="coerce")
+    results = results.sort_values(
+        ["_sort_z", "story", "direction", "output_case"],
+        ascending=[False, True, True, True],
+        na_position="last",
+    ).drop(columns=["_sort_z", "_valid"]).reset_index(drop=True)
+
+    evaluated = results[results["theta"].notna()]
+    if evaluated.empty:
+        status = "INCOMPLETE"
+        message = "غير محسوب: لم تتوفر بيانات متطابقة وصالحة لأي طابق واتجاه."
+    elif (evaluated["classification"] == "LIMIT_EXCEEDED").any():
+        status = "PDELTA_LIMIT_EXCEEDED"
+        message = (
+            "تجاوز θ الحد θmax في نتيجة واحدة أو أكثر؛ لا تُعد هذه النتيجة "
+            "مقبولة بهذا الفحص، ويلزم إجراء التحليل/المراجعة الإنشائية الإضافية "
+            "وفق متطلبات الكود."
+        )
+        if results["theta"].isna().any():
+            message += " توجد أيضاً حالات أو اتجاهات غير محسوبة؛ لا يشملها هذا الحكم."
+    elif (evaluated["classification"] == "INCLUDE_PDELTA").any():
+        status = "PDELTA_REQUIRED"
+        message = (
+            "تجاوز θ حد الإهمال 0.1 في نتيجة واحدة أو أكثر؛ يجب إدراج تأثير "
+            "P-Delta في التحليل وفق الكود العراقي."
+        )
+        if results["theta"].isna().any():
+            message += " توجد أيضاً حالات أو اتجاهات غير محسوبة؛ لا يشملها هذا الحكم."
+    elif results["theta"].isna().any():
+        status = "INCOMPLETE"
+        message = (
+            "النتائج المحسوبة لا تتجاوز حد الإهمال 0.1، لكن بعض الطوابق أو "
+            "الاتجاهات غير مكتملة؛ لا يصدر حكم شامل."
+        )
+    else:
+        status = "PDELTA_NEGLIGIBLE"
+        message = (
+            "جميع قيم θ المحسوبة لا تتجاوز 0.1؛ يمكن إهمال تأثير P-Delta "
+            "وفق فحص الكود العراقي للتركيبات المختارة."
+        )
+    unresolved_inputs = (
+        ["توجد صفوف غير محسوبة؛ راجع عمود السبب لكل طابق واتجاه."]
+        if results["theta"].isna().any()
+        else []
+    )
+
+    return {
+        "status": status,
+        "message": message,
+        "required_inputs": unresolved_inputs,
+        "selected_combinations": list(selected_combinations),
+        "combinations_confirmed": combinations_confirmed,
+        "coefficients_confirmed": coefficients_confirmed,
+        "drift_confirmed": drift_confirmed,
+        "cd": cd_value,
+        "ie": ie_value,
+        "beta": beta_value,
+        "theta_max": theta_max,
+        "results": results,
+        "governing_results": governing,
+    }
+
+
 def pdelta_assessment(source_issue: str | None = None) -> dict[str, object]:
     message = (
-        "غير محسوب: يحتوي قالب Excel على مراجع خارجية مكسورة، كما تشير معادلات "
-        "الحالة إلى خلايا معاملات فارغة؛ لذلك لا يمكن اعتماد نتيجته."
+        "غير محسوب: اختر تركيبات التصميم المؤهلة من بيانات ETABS وأكد معاملات "
+        "التركيبات وCd وIe قبل إصدار نتيجة P-Delta."
     )
     if source_issue:
         message += f" مصدر بيانات إضافي غير متاح أو غير صالح: {source_issue}."
@@ -783,9 +1331,20 @@ def pdelta_assessment(source_issue: str | None = None) -> dict[str, object]:
         "status": "NOT_EVALUATED",
         "message": message,
         "required_inputs": [
-            "حالة/تركيبة الجاذبية الحاكمة لتحديد P لكل طابق.",
-            "حالة الزلزال المطابقة لتحديد V والانجراف النسبي بين الطوابق.",
-            "ارتفاع كل طابق وربط متسق بين قيم القوة والإزاحة واتجاه التحليل.",
-            "معامل الاستقرار وحده الحاكم المعتمد، بما فيه معامل β عند انطباقه.",
+            "اختيار تركيبة أو أكثر من التركيبات المشتركة غير المغلّفة بين Story Forces وStory Drifts وBase Reactions.",
+            "تأكيد أن معاملات الأحمال في التركيبات المختارة تحقق متطلبات الكود.",
+            "تأكيد انطباق Cd وIe المحددين على التحليل.",
+            "تأكيد أن Story Drifts.Drift انجراف مرن غير مكبّر مسبقاً في Cd/Ie.",
+            "توافر محصلات القوى الجانبية FX/FY وFZ في Base Reactions.",
         ],
+        "selected_combinations": [],
+        "combinations_confirmed": False,
+        "coefficients_confirmed": False,
+        "drift_confirmed": False,
+        "cd": None,
+        "ie": None,
+        "beta": None,
+        "theta_max": None,
+        "results": pd.DataFrame(columns=PDELTA_RESULT_COLUMNS),
+        "governing_results": pd.DataFrame(columns=PDELTA_RESULT_COLUMNS),
     }
