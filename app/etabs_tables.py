@@ -1,606 +1,1317 @@
 import io
-import os
-import numpy as np
+
 import pandas as pd
 import streamlit as st
 from docx import Document
-from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.shared import Pt, RGBColor
 
-# إعدادات واجهة التطبيق
+from app.etabs_processing import (
+    OPTIONAL_SHEET_NAMES,
+    REQUIRED_SHEET_NAMES,
+    WorkbookValidationError,
+    calculate_base_reactions,
+    calculate_eccentricity,
+    calculate_modal_mass,
+    calculate_iraqi_2019_story_drifts,
+    calculate_iraqi_2019_torsion_eccentricities,
+    calculate_iraqi_2019_torsional_irregularity,
+    calculate_story_drifts,
+    calculate_pdelta_screening,
+    get_cached_optional_table,
+    get_cached_workbook,
+    pdelta_combination_options,
+    validate_upload_filename,
+)
+
+
 st.set_page_config(
-    page_title="منصة تدقيق نتائج ETABS وتوليد النوتة الحسابية", layout="wide"
+    page_title="منصة تدقيق نتائج الايتابس وتوليد النوتة الحسابية", layout="wide"
 )
 
-# تخصيص خطوط وتنسيقات CSS لتحسين وضوح الجداول والخلايا
-st.markdown("""
+st.markdown(
+    """
     <style>
-    .dataframe {
-        font-family: 'Tahoma', sans-serif !important;
-        font-size: 15px !important;
-        text-align: center !important;
-    }
-    th {
-        background-color: #f0f2f6 !important;
-        color: #1f1f1f !important;
-        font-weight: bold !important;
-        text-align: center !important;
-        padding: 10px !important;
-    }
-    td {
-        text-align: center !important;
-        padding: 8px !important;
-    }
-    h1, h2, h3 {
-        font-family: 'Tahoma', sans-serif !important;
-        font-weight: bold !important;
-    }
+    .dataframe { font-family: Tahoma, sans-serif !important; font-size: 15px !important; }
+    th { background-color: #f0f2f6 !important; color: #1f1f1f !important; font-weight: bold !important; text-align: center !important; }
+    td { text-align: center !important; }
+    h1 { font-family: Tahoma, sans-serif !important; color: #1F4E79 !important; }
+    h2 { font-family: Tahoma, sans-serif !important; color: #0056B3 !important; }
+    h3 { font-family: Tahoma, sans-serif !important; color: #2CA02C !important; }
     </style>
-""", unsafe_allow_html=True)
-
-st.title("🏗️ تدقيق التحليل الإنشائي لبرنامج الايتابس وتوليد النوتة الحسابية الهندسية")
-st.write(
-    "منصة هندسية متكاملة لتدقيق مخرجات ETABS وفق مدونة الزلازل العراقية (IQBC) وأكواد ACI، مع إدخال بيانات المشروع وتصدير تقرير هندسي احترافي."
+    """,
+    unsafe_allow_html=True,
 )
 
-files_dir = os.getcwd()
+st.markdown(
+    "<h2 style='text-align: center; font-size: 40px;'>🏗️ تدقيق التحليل الإنشائي لنتائج برنامج الايتابس وتوليد النوتة الحسابية</h2>",
+    unsafe_allow_html=True,
+)
+st.write(
+    "ارفع مصنف ETABS الخام لقراءة الجداول والتحقق من الحسابات المتاحة وتصدير ملخص النتائج."
+)
+st.subheader("🛠️ المنصة من إعداد وتصميم المهندس الاستشاري عبدالغفور رمضان اللهيبي - 2026")
 
-def get_excel_file_path():
-    for ext in [".xlsx", ".xls", ".XLSX", ".XLS"]:
-        full_path = os.path.join(files_dir, "result_tables" + ext)
-        if os.path.exists(full_path):
-            return full_path
-    return None
+with st.expander("📘 دليل الاستخدام ورفع البيانات", expanded=True):
+    st.markdown(
+        """
+        **اتبع الخطوات بالترتيب:**
 
-def get_sheet_by_name(sheet_names, base_name):
-    clean_base = base_name.lower().replace("_", "").replace(" ", "")
-    for s in sheet_names:
-        clean_sheet = s.lower().replace("_", "").replace(" ", "")
-        if clean_base in clean_sheet or clean_sheet in clean_base:
-            return s
-    return sheet_names[0]
+        1. **اختيار القسم:** استخدم قائمة أقسام التدقيق في الشريط الجانبي؛ يظهر في وسط الصفحة القسم المحدد فقط، وتبقى مدخلات المشروع والإعدادات هناك.
+        2. **احمِ بيانات المشروع:** الاستخدام المقصود محلي وشخصي. لا تعرض منفذ التطبيق على شبكة أو خدمة استضافة دون إعداد مصادقة وحماية مناسبة.
+        3. **جهّز الملف الأساسي:** صدّر جداول ETABS إلى مصنف `.xlsx` وسمّه بالضبط `results.xlsx`. يجب أن يتضمن الأوراق الأساسية المعروضة أدناه. يتوقع التطبيق عنوان الجدول في الصف الأول، وأسماء الأعمدة في الصف الثاني، والوحدات في الصف الثالث، ثم البيانات. لا تغيّر أسماء الأعمدة أو تحذف بياناتها المطلوبة. الأوراق الإضافية داخل هذا الملف تُهمل.
+        4. **الجداول الاختيارية:** يقرأ التطبيق الجداول المعروفة من المصنف الأساسي تلقائياً؛ ارفع ملفاً منفصلاً فقط إذا غاب جدول مطلوب من المصنف. الملف المنفصل يتقدم على الجدول المضمّن.
+        5. **أدخل معلومات التحليل:** أدخل الأبعاد والفترات وفئات المخاطر وSDC والنظام الإنشائي والنسبة العرضية وفق مستندات المشروع. لا تترك قيمة مطلوبة على افتراض أنها استنتجت من الملف. لفحص P-Delta، اختر التركيبات وأكّد صلاحية معاملاتها و`Cd`/`Ie` وأن الانجراف مرن غير مكبّر مسبقاً.
+        6. **راجع النتائج والحالة:** اقرأ التحذيرات وحالة كل فحص. **«غير محسوب» أو «غير مكتمل» لا تعني النجاح**؛ أكمل البيانات أو ارفع الجدول المطلوب ثم أعد المراجعة.
+        7. **نزّل التقرير:** استخدم زر تنزيل تقرير Word في أسفل الشريط الجانبي، واحتفظ به وفق سياسة بيانات مشروعك. سجّل الخروج بعد الانتهاء، خصوصاً على جهاز مشترك.
 
-def clean_dataframe(df):
-    unwanted_patterns = ['^unnamed', '^index', 'تسلسل', 'case type', 'step type', 'step number']
-    pattern = '|'.join(unwanted_patterns)
-    df = df.loc[:, ~df.columns.str.contains(pattern, case=False, na=False)]
-    return df
+        **مهم:** النتائج مساعدة للمراجعة الهندسية وليست اعتماداً أو شهادة سلامة، ولا تغني عن مراجعة مهندس إنشائي مؤهل. إذا تعذر التحليل بسبب اسم ورقة أو عمود، راجع رسالة الخطأ وقارن تصدير ETABS بمتطلبات الجداول أدناه.
+        """
+    )
 
-def filter_lateral_cases(df):
-    """فلترة الجداول لاقتصارها على الأحمال الجانبية فقط (EQ, RS, Wind) واستبعاد أحمال الجاذبية الرأسية"""
-    if df is None or df.empty:
-        return df
-    case_col = next((c for c in df.columns if "case" in c.lower() or "output" in c.lower() or "load" in c.lower()), None)
-    if case_col:
-        # البحث عن الكلمات الدلالية للأحمال الجانبية فقط
-        mask = df[case_col].astype(str).str.upper().str.contains("EQ|RS|WIND|SPEC", na=False)
-        filtered_df = df[mask]
-        return filtered_df if not filtered_df.empty else df
-    return df
-
-def color_results(val):
-    val_str = str(val).upper()
-    if any(k in val_str for k in ["SAFE", "NO P-DELTA", "محقق", "صحيح", "مُحَقَّق"]):
-        return "background-color: #d4edda; color: #155724; font-weight: bold; font-size: 14px;"
-    elif any(k in val_str for k in ["UNSAFE", "SOFT", "❌", "يتطلب تعديل"]):
-        return "background-color: #f8d7da; color: #721c24; font-weight: bold; font-size: 14px;"
-    return "font-size: 14px;"
-
-def color_mass_ratios(val):
-    try:
-        num = float(val)
-        if num >= 0.90:
-            return "background-color: #d4edda; color: #155724; font-weight: bold;"
-    except:
-        pass
-    return ""
-
-master_excel_path = get_excel_file_path()
-
-# ==========================================
-# 🎛️ الشريط الجانبي: حالة الأقسام أولاً ثم البيانات
-# ==========================================
-st.sidebar.header("📋 حالة أقسام التدقيق الإنشائي")
-
-status_dict = {
-    "Centers Of Mass": "⏳ بانتظار التحميل",
-    "Base Reactions": "⏳ بانتظار التحميل",
-    "Story Drifts": "⏳ بانتظار التحميل",
-    "Modal Mass Ratios": "⏳ بانتظار التحميل",
-    "Displacements": "⏳ بانتظار التحميل",
-    "Story Stiffness": "⏳ بانتظار التحميل",
-    "P-Delta Check": "⏳ بانتظار التحميل"
+STATUS_LABELS = {
+    "WAITING": "⏳ بانتظار الرفع",
+    "PASS": "محقق ✅",
+    "FAIL": "غير محقق ❌",
+    "INCOMPLETE": "غير مكتمل ⚠️",
+    "NOT_EVALUATED": "غير محسوب ⚠️",
+    "ERROR": "خطأ في المدخلات ⚠️",
+    "INFORMATIONAL": "معلوماتي — لا يصدر حكم مطابقة",
+    "PDELTA_NEGLIGIBLE": "يمكن إهمال P-Delta حسب الفحص",
+    "PDELTA_REQUIRED": "يجب إدراج P-Delta في التحليل",
+    "PDELTA_LIMIT_EXCEEDED": "تجاوز حد الاستقرار؛ يلزم إجراء هندسي",
+}
+SECTION_NAMES = {
+    "Centers Of Mass": "مراكز الكتلة والصلابة",
+    "Base Reactions": "القص القاعدي ومعامل التحجيم",
+    "Story Drifts": "انجراف الطوابق",
+    "Modal Mass Ratios": "مشاركة الكتلة النمطية",
+    "Displacements": "أقصى/متوسط الإزاحة",
+    "Story Stiffness": "صلابة الطوابق",
+    "P-Delta Check": "فحص P-Delta",
+    "Iraqi 2019 Drift": "انجراف الطوابق — الكود العراقي 2019",
+    "Iraqi Torsion": "الالتواء واللامركزية — الكود العراقي 2019",
 }
 
-sidebar_placeholder = st.sidebar.empty()
 
-def update_sidebar_status(st_dict):
-    sidebar_placeholder.markdown(f"""
-1. **Centers Of Mass**: {st_dict['Centers Of Mass']}
-2. **Base Reactions**: {st_dict['Base Reactions']}
-3. **Story Drifts**: {st_dict['Story Drifts']}
-4. **Modal Mass Ratios**: {st_dict['Modal Mass Ratios']}
-5. **Displacements**: {st_dict['Displacements']}
-6. **Story Stiffness**: {st_dict['Story Stiffness']}
-7. **P-Delta Check**: {st_dict['P-Delta Check']}
-    """)
+def status_label(status: str) -> str:
+    return STATUS_LABELS.get(status, status)
 
-update_sidebar_status(status_dict)
+
+def generate_word_report(
+    project: dict,
+    statuses: dict[str, str],
+    pdelta: dict,
+    findings: list[str],
+) -> io.BytesIO:
+    document = Document()
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title.add_run("ملخص تدقيق نتائج ETABS\nETABS Results Audit Summary")
+    title_run.font.name = "Tahoma"
+    title_run.font.size = Pt(16)
+    title_run.font.bold = True
+    title_run.font.color.rgb = RGBColor(31, 78, 121)
+
+    subtitle = document.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.add_run(
+        f"المشروع: {project['name']} | الموقع: {project['location']}\n"
+        f"المصمم: {project['consultant']} | الاتصال: {project['contact']}"
+    )
+
+    document.add_heading("بيانات وإعدادات المشروع", level=2)
+    for label, value in (
+        ("الاستخدام", project["usage"]),
+        ("عدد الطوابق", project["stories"]),
+        ("الارتفاع الإجمالي (ملم)", project["height"]),
+        ("خرسانة العناصر الشاقولية", project["fc_vertical"]),
+        ("خرسانة العناصر الأفقية", project["fc_horizontal"]),
+        ("حديد التسليح", project["rebar"]),
+        ("الأحمال الميتة الإضافية", project["sdl"]),
+        ("الأحمال الحية", project["ll"]),
+        ("النظام الزلزالي", project["system"]),
+        ("المنطقة الزلزالية Z", project["zone"]),
+        ("معامل التربة S", project["soil"]),
+        ("R", project["r"]),
+        ("Cd", project["cd"]),
+        ("Ie", project["ie"]),
+        ("فئة المخاطر وفق الكود العراقي 2019", project["risk_category"] or "غير محددة"),
+        ("فئة التصميم الزلزالي SDC", project["seismic_design_category"] or "غير محددة"),
+        (
+            "انطباق حد فئة المنشآت الخرسانية الأخرى",
+            "مؤكد من المستخدم" if project["drift_applicability_confirmed"] else "غير مؤكد",
+        ),
+        (
+            "نسبة اللامركزية العرضية المختارة",
+            (
+                f"{project['accidental_eccentricity_percent']:.2f}%"
+                if project["accidental_eccentricity_percent"] is not None
+                else "غير محددة"
+            ),
+        ),
+        (
+            "تأكيد حالات الالتواء العرضي",
+            "مؤكد من المستخدم" if project["accidental_torsion_confirmed"] else "غير مؤكد",
+        ),
+        (
+            "تأكيد انطباق معامل Ax",
+            "مؤكد من المستخدم" if project["ax_applicability_confirmed"] else "غير مؤكد",
+        ),
+        ("Tx (sec)", project["tx"]),
+        ("Ty (sec)", project["ty"]),
+        ("Dx (ملم)", project["dx"]),
+        ("Dy (ملم)", project["dy"]),
+        ("نسبة القص المستهدفة", f"{project['target']:.1f}%"),
+    ):
+        document.add_paragraph(f"{label}: {value}")
+
+    document.add_heading("حالة الفحوص", level=2)
+    table = document.add_table(rows=1, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.rows[0].cells[0].text = "الفحص"
+    table.rows[0].cells[1].text = "الحالة"
+    for name, status in statuses.items():
+        cells = table.add_row().cells
+        cells[0].text = SECTION_NAMES[name]
+        cells[1].text = status_label(status)
+
+    document.add_heading("النتائج الرقمية المحسوبة", level=2)
+    if findings:
+        for finding in findings:
+            document.add_paragraph(finding, style="List Bullet")
+    else:
+        document.add_paragraph("لم تتوفر نتائج رقمية مكتملة لإدراجها.")
+
+    document.add_heading("ملاحظات على منهجية الحساب", level=2)
+    document.add_paragraph(
+        "حد الانجراف المستخدم هو قاعدة القالب: 0.02/(0.7×R) عندما تكون الفترة "
+        "أكبر من 0.7 ثانية، وإلا 0.025/(0.7×R). هذه ترجمة لقاعدة القالب وليست "
+        "شهادة مستقلة بمطابقة الكود."
+    )
+    document.add_paragraph(
+        "فحص الصلابة ونسبة أقصى/متوسط الإزاحة معروضان كبيانات خام دون حكم؛ "
+        "لم يتوفر في القالب تعريف مكتمل لحدود التحقق."
+    )
+    document.add_paragraph(
+        "الأصل في هذه الفحوص هو الكود الزلزالي العراقي 2019. فحص الانجراف يفترض "
+        "أن قيم Story Drifts خطية/مرنة، ويحسب انجراف التصميم = الانجراف المرن × "
+        "Cd / Ie وفق معادلة الانجراف في الفصل 3، §3-9-7، المعادلة (3-9-14). "
+        "حدود الصف المختار للمنشآت الخرسانية الأخرى: 0.020 لفئتي المخاطر I/II، "
+        "و0.015 للفئة III، و0.010 للفئة IV (جدول حدود الانجراف، الفصل 3، "
+        "الصفحة المطبوعة 39/3). لا يُحسب الفحص قبل تحديد الفئة وتأكيد انطباق "
+        "هذا النوع من المنشآت."
+    )
+    document.add_paragraph(
+        "حد 90% لمقارنة SumUX وSumUY هو المعيار الذي قدمه المستخدم، ويطبق "
+        "لكل حالة نمطية على حدة؛ لم يُتحقق رقمياً من نص الحد في نسخة الكود "
+        "المحلية، لذلك لا يُنسب هذا الرقم إلى الكود العراقي. اللامركزية الجوهرية "
+        "تحسب من إحداثيات CM/CR. نسبة اللامركزية العرضية "
+        "لا تُفترض: مستخرج النص المحلي لصفحة الالتواء من نسخة الكود المقدمة "
+        "يعرض قيمة ملتبسة؛ لذلك يلزم اختيار النسبة صراحة لكل تحليل. لا تثبت "
+        "الإزاحة النظرية وحدها إدراج اللامركزية العرضية في حالات التحليل."
+    )
+    document.add_paragraph(
+        "تُعرض عتبتا 1.2 و1.4 كنسب فحص مرشحة من معايير ASCE 7-16 التي قدمها "
+        "المستخدم، ولا تُنسبان إلى الكود العراقي ما لم يثبت ذلك من نصه. معادلة "
+        "Ax وحده الأقصى 3.0 مأخوذان من الكود العراقي، الفصل 3، §3-9-5، "
+        "المعادلة (3-9-12). لا يُحسب Ax إلا بعد تأكيد تضمين اللامركزية العرضية "
+        "في حالات ETABS، واختيار SDC وتأكيد انطباق شروطه؛ ولا يتحقق التطبيق من "
+        "تنفيذ الحالات أو المعامل فعلياً."
+    )
+    document.add_paragraph(str(pdelta["message"]))
+    document.add_paragraph(
+        "فحص P-Delta وفق الكود الزلزالي العراقي 2019، الفصل 3، §3-9/7/1: "
+        "معادلة (3-9/12) تستخدم θ = P × Δ / (V × hs × Cd)، ومعادلة "
+        "(3-9/16) تحدد θmax = min(0.25, 0.5/(β × Cd)). بما أن Drift في "
+        "Story Drifts نسبة انجراف مرن بلا وحدة، ومعادلة انجراف التصميم في "
+        "الكود هي Cd × الانجراف المرن / Ie، تختزل معادلة الاستقرار إلى "
+        "θ = P × |Drift| / (|V| × Ie)، مع اعتبار P الموجب ضغطاً. استُخدم "
+        "β = 1.0 تحفظياً كما يسمح الكود. إذا تجاوز θ قيمة θmax فهذه نتيجة "
+        "غير مقبولة بهذا الفحص وتتطلب تحليلاً/مراجعة إنشائية إضافية وفق الكود؛ "
+        "وإلا فـ θ ≤ 0.1 يسمح بإهمال الأثر، و0.1 < θ ≤ θmax "
+        "يتطلب إدراج P-Delta."
+    )
+    document.add_paragraph(
+        "استخدم الحساب صف Location = Bottom من Story Forces، وCase Type = "
+        "Combination فقط، وطابق Output Case حرفيًا مع Story Drifts. استُبعدت "
+        "مخرجات Max/Min وMax_envelope والصفوف ذات Step Number لأنها ليست "
+        "حالة متزامنة صالحة للمقارنة، "
+        "واستخدم أكبر قيمة مطلقة للانجراف بين نقاط الطابق. رُتبت الطوابق بحسب "
+        "منسوب Z تنازليًا. لا يحوي الملف تعريفات معاملات التركيبات، لذا يعتمد "
+        "الحساب على اختيار المستخدم وتأكيده، ولا يتحقق من صلاحية عواملها."
+    )
+    document.add_paragraph(
+        "تُعرض فقط التركيبات التي لها محصلة قص قاعدي جانبية في Base Reactions. "
+        "يُعد اتجاه X/Y مؤثراً إذا تجاوزت قيمة FX/FY المطلقة 1e-6 × |FZ|؛ "
+        "هذه سماحية عددية لتمييز ضوضاء التقريب عن الحمل الجانبي وليست حداً "
+        "للكود العراقي. ويظل الاتجاه الذي لا يحققها غير محسوب، لا ناجحاً."
+    )
+    document.add_paragraph(
+        "التركيبات المختارة: "
+        + (
+            ", ".join(pdelta["selected_combinations"])
+            if pdelta["selected_combinations"]
+            else "لم تُحدد"
+        )
+    )
+    document.add_paragraph(
+        f"تأكيد معاملات التركيبات: {'نعم' if pdelta['combinations_confirmed'] else 'لا'}; "
+        f"تأكيد Cd وIe: {'نعم' if pdelta['coefficients_confirmed'] else 'لا'}; "
+        f"تأكيد أن Drift مرن وغير مكبّر مسبقاً: "
+        f"{'نعم' if pdelta['drift_confirmed'] else 'لا'}."
+    )
+    governing = pdelta.get("governing_results")
+    if isinstance(governing, pd.DataFrame) and not governing.empty:
+        document.add_heading("نتائج P-Delta الحاكمة لكل طابق واتجاه", level=3)
+        pdelta_table = document.add_table(rows=1, cols=11)
+        pdelta_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        headings = (
+            "الطابق",
+            "Z (mm)",
+            "الاتجاه",
+            "التركيبة الحاكمة",
+            "|قص القاعدة|",
+            "P",
+            "|V|",
+            "|Drift|",
+            "θ",
+            "θmax",
+            "التصنيف / السبب",
+        )
+        for cell, heading in zip(pdelta_table.rows[0].cells, headings):
+            cell.text = heading
+        classifications = {
+            "NEGLIGIBLE": "يمكن الإهمال",
+            "INCLUDE_PDELTA": "يجب إدراج P-Delta",
+            "LIMIT_EXCEEDED": "تجاوز θmax",
+            "NOT_EVALUATED": "غير محسوب",
+        }
+        for row in governing.itertuples(index=False):
+            cells = pdelta_table.add_row().cells
+            values = (
+                row.story,
+                f"{row.story_z:.0f}" if pd.notna(row.story_z) else "غير متاح",
+                row.direction,
+                row.output_case,
+                f"{row.base_shear:.5f}"
+                if pd.notna(row.base_shear)
+                else "غير مؤثر/غير محسوب",
+                f"{row.p:.5f}" if pd.notna(row.p) else "غير محسوب",
+                f"{row.story_shear:.5f}"
+                if pd.notna(row.story_shear)
+                else "غير محسوب",
+                f"{row.elastic_drift_ratio:.7f}"
+                if pd.notna(row.elastic_drift_ratio)
+                else "غير محسوب",
+                f"{row.theta:.5f}" if pd.notna(row.theta) else "غير محسوب",
+                f"{row.theta_max:.5f}" if pd.notna(row.theta_max) else "غير متاح",
+                classifications.get(row.classification, row.classification)
+                + (f": {row.reason}" if row.reason else ""),
+            )
+            for cell, value in zip(cells, values):
+                cell.text = str(value)
+    for item in pdelta["required_inputs"]:
+        document.add_paragraph(item, style="List Bullet")
+    document.add_paragraph(
+        "هذا التقرير يلخص الفحوص المحسوبة من الملف المرفوع ولا يستبدل مراجعة "
+        "المهندس الإنشائي أو اعتماد المعايير التصميمية للمشروع."
+    )
+
+    stream = io.BytesIO()
+    document.save(stream)
+    stream.seek(0)
+    return stream
+
+
+status_dict = {name: "WAITING" for name in SECTION_NAMES}
+section_navigation = {
+    "centers": "1. مراكز الكتلة والصلابة",
+    "base_reactions": "2. القص القاعدي ومعامل التحجيم",
+    "story_drifts": "3. انجراف الطوابق",
+    "iraqi_drift": "انجراف الطوابق — الكود العراقي 2019",
+    "modal_mass": "4. مشاركة الكتلة النمطية",
+    "torsion": "اللامركزية والالتواء — الكود العراقي 2019",
+    "displacements": "5. أقصى/متوسط الإزاحة",
+    "stiffness": "6. صلابة الطوابق",
+    "pdelta": "7. فحص P-Delta",
+    "additional_tables": "8. جداول ETABS الإضافية",
+}
+selected_section = st.sidebar.radio(
+    "أقسام التدقيق",
+    options=list(section_navigation),
+    format_func=section_navigation.get,
+    key="selected_audit_section",
+)
+st.markdown(
+    "<style>"
+    + "".join(
+        f".st-key-audit_section_{key} {{ display: none !important; }}"
+        for key in section_navigation
+        if key != selected_section
+    )
+    + "</style>",
+    unsafe_allow_html=True,
+)
+status_placeholder = st.sidebar.empty()
+
+
+def render_sidebar_status(statuses: dict[str, str]) -> None:
+    with status_placeholder.container():
+        st.header("📋 حالة أقسام التدقيق")
+        for name, status in statuses.items():
+            st.write(f"**{name}**: {status_label(status)}")
+
+
+render_sidebar_status(status_dict)
 st.sidebar.markdown("---")
 
 st.sidebar.header("📋 بيانات المشروع الأساسية")
 project_name = st.sidebar.text_input("اسم المشروع", value="مبنى تجاري")
-project_location = st.sidebar.text_input("موقع المشروع", value="العراق - الموصل")
-consultant_name = st.sidebar.text_input("المصمم الاستشاري / الخبير", value="عبدالغفور رمضان عيدان")
-contact_info = st.sidebar.text_input("معلومات الاتصال", value="+9647740884754")
-
-building_usage = st.sidebar.selectbox("طبيعة الاستخدام (Use Type)", [
-    "مبنى إداري",
-    "مبنى سكني",
-    "مبنى تجاري",
-    "منشأ تعليمي / خدمي",
-    "منشأ صناعي / مستودع"
-])
-
-num_stories = st.sidebar.number_input("عدد الطوابق", value=4, step=1)
-total_height = st.sidebar.number_input("الارتفاع الإجمالي للمبنى (م)", value=7.0, step=0.5)
+project_location = st.sidebar.text_input("موقع المشروع", value="الموصل")
+consultant_name = st.sidebar.text_input(
+    "المصمم الاستشاري", value="عبدالغفور رمضان اللهيبي"
+)
+contact_info = st.sidebar.text_input("معلومات الاتصال", value="")
+building_usage = st.sidebar.selectbox(
+    "طبيعة الاستخدام",
+    ["مبنى صناعي", "مبنى إداري", "مبنى سكني", "مبنى تجاري", "منشأ تعليمي / خدمي"],
+)
+num_floors = st.sidebar.number_input("عدد الطوابق المتكررة", value=2, step=1)
+ground_height = st.sidebar.number_input(
+    "ارتفاع الطابق الأرضي (ملم)", value=4500, step=500
+)
+typical_height = st.sidebar.number_input(
+    "ارتفاع الطابق المتكرر (ملم)", value=3500, step=500
+)
+total_height = ground_height + num_floors * typical_height
+num_stories = num_floors + 1
+st.sidebar.write(f"الارتفاع الإجمالي للمبنى: {total_height:.0f} ملم")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🧱 خواص المواد الإنشائية")
-fc_vertical = st.sidebar.selectbox("مقاومة خرسانة العناصر الشاقولية (أعمدة/جدران)", ["f'c = 30 MPa", "f'c = 35 MPa", "f'c = 40 MPa", "f'c = 45 MPa"])
-fc_horizontal = st.sidebar.selectbox("مقاومة خرسانة العناصر الأفقية (بلاطات/جسور)", ["f'c = 25 MPa", "f'c = 28 MPa", "f'c = 30 MPa", "f'c = 35 MPa"])
-rebar_grade = st.sidebar.selectbox("حديد التسليح الرئيسي", [
-    "Grade 60 (fy = 420 MPa)",
-    "Grade 40 (fy = 280 MPa)",
-    "Grade 50 (fy = 350 MPa)",
-    "Grade 75 (fy = 520 MPa)",
-    "Strands - Low Relaxation Grade 270 (fpu = 1860 MPa)"
-])
+fc_vertical = st.sidebar.selectbox(
+    "مقاومة خرسانة العناصر الشاقولية",
+    ["f'c = 30 MPa", "f'c = 35 MPa", "f'c = 40 MPa", "f'c = 45 MPa"],
+)
+fc_horizontal = st.sidebar.selectbox(
+    "مقاومة خرسانة العناصر الأفقية",
+    ["f'c = 25 MPa", "f'c = 28 MPa", "f'c = 30 MPa", "f'c = 35 MPa"],
+)
+rebar_grade = st.sidebar.selectbox(
+    "حديد التسليح الرئيسي",
+    [
+        "Grade 60 (fy = 420 MPa)",
+        "Grade 40 (fy = 280 MPa)",
+        "Grade 50 (fy = 350 MPa)",
+        "Grade 75 (fy = 520 MPa)",
+        "Strands - Low Relaxation Grade 270 (fpu = 1860 MPa)",
+    ],
+)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚖️ نطاقات الأحمال التصميمية (SDL & LL)")
-sdl_range = st.sidebar.selectbox("الأحمال الميتة الإضافية (SDL Range)", [
-    "2.0 - 3.0 kN/m² (طوابق سكنية / مكتبية)",
-    "3.0 - 4.0 kN/m² (طوابق تجارية / إدارية)",
-    "4.0 - 5.0 kN/m² (أسطح مع تبليط وعزل ثقيل)"
-])
-ll_range = st.sidebar.selectbox("الأحمال الحية (Live Loads Range)", [
-    "1.0 - 1.5 kN/m² (الأسطح)",
-    "2.0 - 2.5 kN/m² (المناطق الإدارية والمكتبية)",
-    "3.0 - 5.0 kN/m² (المناطق التجارية / التجمع العام)"
-])
+st.sidebar.header("⚖️ نطاقات الأحمال التصميمية")
+sdl_range = st.sidebar.selectbox(
+    "الأحمال الميتة الإضافية (SDL)",
+    [
+        "2.0 - 4.0 kN/m² (مخازن / أحمال تشطيبية وجدران)",
+        "3.0 - 4.0 kN/m² (أحمال السلالم)",
+        "2.0 - 3.0 kN/m² (طوابق سكنية / مكتبية)",
+        "4.0 - 5.0 kN/m² (أسطح وعزل ثقيل)",
+    ],
+)
+ll_range = st.sidebar.selectbox(
+    "الأحمال الحية (LL)",
+    [
+        "5.0 - 10.0 kN/m² (مخازن واستخدامات ثقيلة)",
+        "3.0 - 3.5 kN/m² (البالكونات)",
+        "1.0 - 1.5 kN/m² (الأسطح)",
+        "3.0 kN/m² (المطابخ والحمامات)",
+        "3.0 kN/m² (السلالم السكنية)",
+        "4.8 kN/m² (السلالم الإدارية والفندقية)",
+        "2.0 kN/m² (الغرف السكنية)",
+    ],
+)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ إعدادات الزلازل والتربة (مدونة العراق)")
+st.sidebar.header("⚙️ إعدادات الزلازل والتربة")
 zone_options = {
     "المنطقة الزلزالية الثانية (الموصل / نينوى) - Z = 0.15": 0.15,
     "المنطقة الزلزالية الأولى (بغداد / وسط العراق) - Z = 0.10": 0.10,
     "المنطقة الزلزالية الثالثة (الشمال الشرقي) - Z = 0.20": 0.20,
 }
-selected_zone = st.sidebar.selectbox("المنطقة الزلزالية (Z)", list(zone_options.keys()))
+selected_zone = st.sidebar.selectbox("المنطقة الزلزالية (Z)", list(zone_options))
 zone_z = zone_options[selected_zone]
-
 soil_options = {
-    "النوع (II): تربة متوسطة / كثيفة (Stiff Soil - S_C)": 1.2,
+    "النوع (II): تربة متوسطة / كثيفة (Stiff Soil - S_C/Class D)": 1.2,
     "النوع (I): صخور صلبة (Rock - S_A/S_B)": 1.0,
     "النوع (III): تربة طينية سميكة (Soft Soil - S_D)": 1.5,
 }
-selected_soil = st.sidebar.selectbox("نوع التربة (Soil Profile)", list(soil_options.keys()))
+selected_soil = st.sidebar.selectbox("نوع التربة (Site Class)", list(soil_options))
 soil_factor_s = soil_options[selected_soil]
-
-importance_factor = st.sidebar.selectbox("عامل الأهمية (Ie)", [1.0, 1.25, 1.5], index=0)
-
-seismic_systems = {
-    "جدران قص خرسانية مسلحة (Shear Walls / Bearing Walls) [R=5.0, Cd=4.5]": (5.0, 4.5),
-    "إطارات خرسانية مقاومة للعزوم خاصة [R=8.0, Cd=5.5]": (8.0, 5.5),
-    "نظام مزدوج (Dual System) [R=7.0, Cd=5.5]": (7.0, 5.5),
-}
-selected_system = st.sidebar.selectbox("النظام الإنشائي المقاوم للزلازل", list(seismic_systems.keys()))
-response_mod_r, deflection_cd = seismic_systems[selected_system]
-
-asce_percentage = st.sidebar.slider("النسبة المطلوبة للقص الديناميكي من الاستاتيكي (%)", 80.0, 100.0, 100.0, 5.0) / 100.0
-
-st.markdown("---")
-
-# ==========================================
-# 📐 الشاشة الرئيسية: أبعاد المبنى
-# ==========================================
-st.markdown(f"### 📐 إدخال أبعاد المبنى للمشروع: {project_name} ({project_location})")
-
-col_dim1, col_dim2 = st.columns(2)
-with col_dim1:
-    dx_val = st.number_input("البعد الإجمالي للمبنى في الاتجاه الأفقي ($D_x$ - ملم)", value=16000.0, step=100.0)
-with col_dim2:
-    dy_val = st.number_input("البعد الإجمالي للمبنى في الاتجاه العمودي ($D_y$ - ملم)", value=25000.0, step=100.0)
-
-st.markdown("---")
-
-# ==========================================
-# دالة توليد تقرير الـ Word الهندسي الشامل
-# ==========================================
-def generate_word_report(project_name, project_location, consultant_name, contact_info, building_usage, num_stories, total_height, fc_vert, fc_horiz, rebar, sdl_val, ll_val, zone_z, soil_factor_s, importance_factor, r_val, cd_val, status_dict, df_comp):
-    doc = Document()
-    
-    title_p = doc.add_paragraph()
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run(f"نوتة حسابية وتقارير التدقيق الإنشائي - {project_name}")
-    title_run.font.name = 'Tahoma'
-    title_run.font.size = Pt(16)
-    title_run.font.bold = True
-    title_run.font.color.rgb = RGBColor(31, 78, 121)
-    
-    sub_p = doc.add_paragraph()
-    sub_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub_run = sub_p.add_run(f"الموقع: {project_location} | المصمم: {consultant_name} | هاتف: {contact_info}")
-    sub_run.font.name = 'Tahoma'
-    sub_run.font.size = Pt(11)
-    
-    doc.add_paragraph("---")
-    
-    # 1. معلومات المشروع والنظام الإنشائي والمواد
-    h1 = doc.add_heading(level=2)
-    h1.add_run("أولاً: بيانات المشروع والخواص الهندسية والمواد")
-    p_info = doc.add_paragraph()
-    p_info.add_run(f"• طبيعة الاستخدام: {building_usage}\n")
-    p_info.add_run(f"• عدد الطوابق: {num_stories} طوابق (الارتفاع الكلي: {total_height} متر)\n")
-    p_info.add_run(f"• خرسانة العناصر الشاقولية (أعمدة وجدران): {fc_vert}\n")
-    p_info.add_run(f"• خرسانة العناصر الأفقية (بلاطات وجهات): {fc_horiz}\n")
-    p_info.add_run(f"• حديد التسليح الرئيسي المعتمد: {rebar}\n")
-    p_info.add_run(f"• الأكواد المعتمدة: ACI 318-19 / ASCE 7-16 / مدونة الزلازل والأحمال العراقية\n")
-    
-    # 2. الأحمال التصميمية وتراكيب الأحمال
-    h_loads = doc.add_heading(level=2)
-    h_loads.add_run("ثانياً: الأحمال التصميمية وتراكيب الأحمال المعتمدة")
-    p_loads = doc.add_paragraph()
-    p_loads.add_run(f"• الأحمال الميتة الإضافية (SDL Range): {sdl_val}\n")
-    p_loads.add_run(f"• الأحمال الحية (Live Loads Range): {ll_val}\n")
-    p_loads.add_run("• تراكيب الأحمال القصوى (ULS):\n")
-    p_loads.add_run("  - 1.4 DL\n  - 1.2 DL + 1.6 LL\n  - 1.2 DL + 1.0 LL ± 1.0 EQx ± 0.3 EQy\n  - 0.9 DL ± 1.0 EQx\n")
-    p_loads.add_run("• تراكيب أحمال الخدمة (Service Combinations):\n")
-    p_loads.add_run("  - DL + LL (لتدقيق إجهادات التربة والهطول)\n")
-
-    # 3. المعاملات الزلزالية
-    h2 = doc.add_heading(level=2)
-    h2.add_run("ثالثاً: المعاملات الزلزالية والرياح التصميمية")
-    p_seismic = doc.add_paragraph()
-    p_seismic.add_run(f"• معامل المنطقة الزلزالية (Z): {zone_z}\n")
-    p_seismic.add_run(f"• معامل التربة الموقع (S): {soil_factor_s}\n")
-    p_seismic.add_run(f"• معامل الأهمية الإنشائية (Ie): {importance_factor}\n")
-    p_seismic.add_run(f"• معامل تعديل الاستجابة (R): {r_val} | عامل تضخيم الانتقالات (Cd): {cd_val}\n")
-    p_seismic.add_run("• سرعة الرياح التصميمية: 32 m/s (74 mph) | معامل التعرض: Category B\n")
-    
-    # 4. ملخص التحقق الإنشائي
-    h3 = doc.add_heading(level=2)
-    h3.add_run("رابعاً: ملخص حالة التدقيق لأقسام النموذج (ETABS)")
-    table_status = doc.add_table(rows=1, cols=2)
-    table_status.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table_status.rows[0].cells[0].text = "بند التدقيق (Check Item)"
-    table_status.rows[0].cells[1].text = "حالة التحقق (Status)"
-    for item, status in status_dict.items():
-        row_cells = table_status.add_row().cells
-        row_cells[0].text = str(item)
-        row_cells[1].text = str(status)
-    doc.add_paragraph()
-    
-    # 5. مقارنة القص القاعدي
-    h4 = doc.add_heading(level=2)
-    h4.add_run("خامساً: مقارنة وزيادة القص القاعدي (Base Reactions & Scale Factors)")
-    if df_comp is not None and not df_comp.empty:
-        table_comp = doc.add_table(rows=1, cols=len(df_comp.columns))
-        table_comp.alignment = WD_TABLE_ALIGNMENT.CENTER
-        for i, col_name in enumerate(df_comp.columns):
-            table_comp.rows[0].cells[i].text = str(col_name)
-        for _, row in df_comp.iterrows():
-            row_cells = table_comp.add_row().cells
-            for i, val in enumerate(row):
-                row_cells[i].text = str(val)
-    doc.add_paragraph()
-    
-    # 6. التوصيات والنتائج
-    h5 = doc.add_heading(level=2)
-    h5.add_run("سادساً: الخلاصة والتوصيات الهندسية")
-    p_concl = doc.add_paragraph()
-    p_concl.add_run("1. أظهرت نتائج التحليل الإنشائي أن المبنى آمن ومطابق لمتطلبات الكودات الهندسية تحت الأحمال الرأسية والجانبية.\n")
-    p_concl.add_run("2. تم التحقق من إجهادات التربة تحت الأساسات (Raft Foundation) وتبين أنها أقل من القوة المسموح بها للتربة.\n")
-    p_concl.add_run("3. تم تدقيق الهبوط الكلي والتفاضلي وعرض التشقق وتبين تحقيقها الكامل للحدود المسموحة.\n")
-
-    file_stream = io.BytesIO()
-    doc.save(file_stream)
-    file_stream.seek(0)
-    return file_stream
-
-# ==========================================
-# معالجة قراءة الملفات وعرض النتائج
-# ==========================================
-if master_excel_path is not None:
-    xls_file = pd.ExcelFile(master_excel_path)
-    sheet_names = xls_file.sheet_names
-
-    # ==========================================
-    # 1. Centers Of Mass And Rigidity
-    # ==========================================
-    st.header("1. Centers Of Mass And Rigidity")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم الأول"):
-        st.markdown("""
-        * **حساب اللامركزية ($e$):** $e_x = |X_r - X_m|, \quad e_y = |Y_r - Y_m|$
-        * **نسبة اللامركزية المئوية ($e/D$):** $\\frac{e_x}{D_x} \\times 100 \\le 15\\%$
-        """)
-
-    target_sheet_1 = get_sheet_by_name(sheet_names, "Check_centers_of_mass_and_rigidity")
-    try:
-        df_rigidity = pd.read_excel(master_excel_path, sheet_name=target_sheet_1, index_col=None)
-        df_rigidity = clean_dataframe(df_rigidity)
-        df_rigidity.columns = df_rigidity.columns.str.strip()
-
-        res_df = pd.DataFrame()
-        story_col = next((c for c in df_rigidity.columns if "story" in c.lower()), df_rigidity.columns[0])
-        diaph_col = next((c for c in df_rigidity.columns if "diaph" in c.lower()), df_rigidity.columns[1] if len(df_rigidity.columns)>1 else df_rigidity.columns[0])
-        xr_col = next((c for c in df_rigidity.columns if "x" in c.lower() and ("rig" in c.lower() or "1" in c.lower())), df_rigidity.columns[2] if len(df_rigidity.columns)>2 else df_rigidity.columns[0])
-        yr_col = next((c for c in df_rigidity.columns if "y" in c.lower() and ("rig" in c.lower() or "2" in c.lower())), df_rigidity.columns[3] if len(df_rigidity.columns)>3 else df_rigidity.columns[0])
-        xm_col = next((c for c in df_rigidity.columns if "x" in c.lower() and "mas" in c.lower()), df_rigidity.columns[4] if len(df_rigidity.columns)>4 else df_rigidity.columns[0])
-        ym_col = next((c for c in df_rigidity.columns if "y" in c.lower() and "mas" in c.lower()), df_rigidity.columns[5] if len(df_rigidity.columns)>5 else df_rigidity.columns[0])
-
-        res_df["Story"] = df_rigidity[story_col].astype(str)
-        res_df["Diaphragm"] = df_rigidity[diaph_col].astype(str)
-        res_df["Xr"] = pd.to_numeric(df_rigidity[xr_col], errors="coerce").fillna(0).astype(float)
-        res_df["Yr"] = pd.to_numeric(df_rigidity[yr_col], errors="coerce").fillna(0).astype(float)
-        res_df["Xm"] = pd.to_numeric(df_rigidity[xm_col], errors="coerce").fillna(0).astype(float)
-        res_df["Ym"] = pd.to_numeric(df_rigidity[ym_col], errors="coerce").fillna(0).astype(float)
-
-        res_df["Dx"] = float(dx_val)
-        res_df["Dy"] = float(dy_val)
-
-        res_df["ex"] = np.abs(res_df["Xr"] - res_df["Xm"])
-        res_df["ey"] = np.abs(res_df["Yr"] - res_df["Ym"])
-        res_df["ex/Dx %"] = (res_df["ex"] / res_df["Dx"]) * 100
-        res_df["ey/Dy %"] = (res_df["ey"] / res_df["Dy"]) * 100
-
-        res_df["X_Result"] = np.where(res_df["ex/Dx %"] <= 15.0, "SAFE", "UNSAFE")
-        res_df["Y_Result"] = np.where(res_df["ey/Dy %"] <= 15.0, "SAFE", "UNSAFE")
-
-        res_df[["Xr", "Yr", "Xm", "Ym", "ex/Dx %", "ey/Dy %"]] = res_df[["Xr", "Yr", "Xm", "Ym", "ex/Dx %", "ey/Dy %"]].round(2)
-
-        if (res_df["X_Result"] == "UNSAFE").any() or (res_df["Y_Result"] == "UNSAFE").any():
-            status_dict["Centers Of Mass"] = "غير محقق ❌"
-        else:
-            status_dict["Centers Of Mass"] = "محقق ✅"
-
-        display_df = res_df[["Story", "Diaphragm", "Xr", "Yr", "Xm", "Ym", "ex/Dx %", "X_Result", "ey/Dy %", "Y_Result"]]
-        st.dataframe(display_df.style.map(color_results, subset=["X_Result", "Y_Result"]), use_container_width=True)
-    except Exception as e:
-        status_dict["Centers Of Mass"] = "خطأ ⚠️"
-        st.error(f"خطأ في ورقة مركز الكتلة والصلابة: {e}")
-
-    st.markdown("---")
-
-    # ==========================================
-    # 2. Base Reactions (مصفاة للأحمال الجانبية فقط)
-    # ==========================================
-    st.header("2. Base Reactions & Dynamic Scale Factor Adjustment")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم الثاني"):
-        st.markdown("""
-        * **معادلة تعديل عامل التحجيم (Scale Factor):** $SF_{adjusted} = \left( \\frac{V_{static} \\times \\text{Target \\%}}{V_{dynamic}} \\right) \\times \\left( \\frac{I_e}{R} \\right)$
-        """)
-
-    target_sheet_2 = get_sheet_by_name(sheet_names, "base_reactions")
-    df_comp = pd.DataFrame()
-    try:
-        df_react = pd.read_excel(master_excel_path, sheet_name=target_sheet_2, index_col=None)
-        df_react = clean_dataframe(df_react)
-        df_react.columns = df_react.columns.str.strip()
-        
-        r_case_col = next((c for c in df_react.columns if "case" in c.lower()), None)
-        fx_col = next((c for c in df_react.columns if "fx" in c.lower() or "f_x" in c.lower()), None)
-        fy_col = next((c for c in df_react.columns if "fy" in c.lower() or "f_y" in c.lower()), None)
-
-        if r_case_col and fx_col:
-            df_react["Clean_Case"] = df_react[r_case_col].astype(str).str.upper().str.strip()
-            eqx_row = df_react[df_react["Clean_Case"] == "EQX"]
-            eqy_row = df_react[df_react["Clean_Case"] == "EQY"] if fy_col and not df_react[df_react["Clean_Case"] == "EQY"].empty else eqx_row
-            
-            rsx_row = df_react[df_react["Clean_Case"].str.contains("RSX")]
-            rsy_row = df_react[df_react["Clean_Case"].str.contains("RSY")] if fy_col and not df_react[df_react["Clean_Case"].str.contains("RSY")].empty else rsx_row
-
-            v_static_x = abs(float(pd.to_numeric(eqx_row[fx_col], errors="coerce").values[0])) if not eqx_row.empty else 0.0
-            v_static_y = abs(float(pd.to_numeric(eqy_row[fy_col if fy_col else fx_col], errors="coerce").values[0])) if not eqy_row.empty else 0.0
-
-            v_dyn_x = abs(float(pd.to_numeric(rsx_row[fx_col], errors="coerce").abs().max())) if not rsx_row.empty else 0.0
-            v_dyn_y = abs(float(pd.to_numeric(rsy_row[fy_col if fy_col else fx_col], errors="coerce").abs().max())) if not rsy_row.empty else 0.0
-
-            status_x_val = v_dyn_x >= (v_static_x * asce_percentage)
-            status_y_val = v_dyn_y >= (v_static_y * asce_percentage)
-
-            status_dict["Base Reactions"] = "محقق ✅" if (status_x_val and status_y_val) else "يتطلب تعديل ⚠️"
-
-            comparison_data = {
-                "Direction": ["الاتجاه الأفقي (X)", "الاتجاه العمودي (Y)"],
-                "Static Base Shear (V_st)": [round(v_static_x, 2), round(v_static_y, 2)],
-                "Dynamic Base Shear (V_dyn)": [round(v_dyn_x, 2), round(v_dyn_y, 2)],
-                "Target Ratio (%)": [asce_percentage * 100, asce_percentage * 100],
-                "Check Status": ["محقق ✅" if status_x_val else "يتطلب تعديل ⚠️", "محقق ✅" if status_y_val else "يتطلب تعديل ⚠️"]
-            }
-            df_comp = pd.DataFrame(comparison_data)
-            st.dataframe(df_comp, use_container_width=True)
-
-            col_res1, col_res2 = st.columns(2)
-            with col_res1:
-                st.markdown("#### الاتجاه X")
-                if v_dyn_x > 0 and v_static_x > 0:
-                    req_scale_x = ((v_static_x * asce_percentage) / v_dyn_x) * (importance_factor / response_mod_r)
-                    st.metric(label="Scale Factor المقترح لـ RSX", value=f"{req_scale_x:.4f}")
-            with col_res2:
-                st.markdown("#### الاتجاه Y")
-                if v_dyn_y > 0 and v_static_y > 0:
-                    req_scale_y = ((v_static_y * asce_percentage) / v_dyn_y) * (importance_factor / response_mod_r)
-                    st.metric(label="Scale Factor المقترح لـ RSY", value=f"{req_scale_y:.4f}")
-    except Exception as e:
-        status_dict["Base Reactions"] = "خطأ ⚠️"
-        st.error(f"خطأ في ورقة Base Reactions: {e}")
-
-    st.markdown("---")
-
-    # ==========================================
-    # 3. Story Drifts (مصفاة للأحمال الجانبية فقط)
-    # ==========================================
-    st.header("3. Story Drifts")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم الثالث"):
-        st.markdown("""
-        * **الانزلاق الجانبي للطابق (Story Drift Limit):** $\\Delta \\le 0.020 \\times h_x$
-        """)
-
-    target_sheet_3 = get_sheet_by_name(sheet_names, "story_drifts")
-    try:
-        df_drifts = pd.read_excel(master_excel_path, sheet_name=target_sheet_3, index_col=None)
-        df_drifts = clean_dataframe(df_drifts)
-        
-        # فلترة الجدول ليقتصر على الأحمال الجانبية فقط
-        df_drifts = filter_lateral_cases(df_drifts)
-
-        result_col = next((c for c in df_drifts.columns if "result" in c.lower()), df_drifts.columns[-1] if not df_drifts.empty else None)
-        if result_col and result_col in df_drifts.columns:
-            has_unsafes = df_drifts[result_col].astype(str).str.upper().str.contains("UNSAFE").any()
-            status_dict["Story Drifts"] = "غير محقق ❌" if has_unsafes else "محقق ✅"
-        else:
-            status_dict["Story Drifts"] = "محقق ✅"
-
-        st.dataframe(df_drifts, use_container_width=True)
-    except Exception as e:
-        status_dict["Story Drifts"] = "محقق ✅"
-
-    st.markdown("---")
-
-    # ==========================================
-    # 4. Modal Participating Mass Ratios (مع النسب أسفل الجدول والتظليل للقيم > 90%)
-    # ==========================================
-    st.header("4. Modal Participating Mass Ratios")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم الرابع"):
-        st.markdown("""
-        * **مشاركة الكتلة الديناميكية:** يجب أن تبلغ النسبة التراكمية $\\ge 90\\%$.
-        """)
-
-    target_sheet_4 = get_sheet_by_name(sheet_names, "modal_participating_mass_ratios")
-    try:
-        df_modal = pd.read_excel(master_excel_path, sheet_name=target_sheet_4, index_col=None)
-        df_modal = clean_dataframe(df_modal)
-        status_dict["Modal Mass Ratios"] = "محقق ✅"
-
-        # استخراج أقصى نسب تراكمية SumUX, SumUY, SumRX, SumRY لعرضها كقيم صريحة أسفل الجدول
-        sum_cols = {c: pd.to_numeric(df_modal[c], errors='coerce').max() for c in df_modal.columns if "sum" in c.lower()}
-        
-        # عرض الجدول مع تطبيق التظليل المباشر للقيم >= 0.90
-        st.dataframe(df_modal.style.map(color_mass_ratios, subset=[c for c in df_modal.columns if "sum" in c.lower()]), use_container_width=True)
-
-        # عرض النسب المئوية الكلية في أسفل الجدول
-        st.markdown("#### 📊 ملخص أقصى نسبة مشاركة كتلة تراكمية مسجلة:")
-        cols_summary = st.columns(len(sum_cols) if sum_cols else 4)
-        idx = 0
-        for col_name, val in sum_cols.items():
-            with cols_summary[idx % len(cols_summary)]:
-                pct_val = val * 100 if val <= 1.0 else val
-                st.metric(label=f"النسبة العظمى لـ {col_name}", value=f"{pct_val:.2f}%", delta="مقبول (>=90%)" if pct_val >= 90 else "أقل من المطلوب")
-            idx += 1
-
-    except Exception as e:
-        status_dict["Modal Mass Ratios"] = "محقق ✅"
-
-    st.markdown("---")
-
-    # ==========================================
-    # 5. Story Max Over Avg Displacements
-    # ==========================================
-    st.header("5. Story Max Over Avg Displacements")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم الخامس"):
-        st.markdown("""
-        * **الانتقال النسبي الأقصى إلى المتوسط ($Max / Avg$):** يُشترط ألا يتجاوز الحدود المسموحة.
-        """)
-
-    target_sheet_5 = get_sheet_by_name(sheet_names, "story_max_over_avg_displacements")
-    try:
-        df_disp = pd.read_excel(master_excel_path, sheet_name=target_sheet_5, index_col=None)
-        df_disp = clean_dataframe(df_disp)
-        status_dict["Displacements"] = "محقق ✅"
-        st.dataframe(df_disp, use_container_width=True)
-    except Exception as e:
-        status_dict["Displacements"] = "محقق ✅"
-
-    st.markdown("---")
-
-    # ==========================================
-    # 6. Story Stiffness (Soft Story Check مع حقل ووضوح الطابق الضعيف)
-    # ==========================================
-    st.header("6. Story Stiffness")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم السادس"):
-        st.markdown("""
-        * **فحص الطابق الضعيف (Soft Story):** النسبة $\\ge 70\\%$.
-        """)
-
-    target_sheet_6 = get_sheet_by_name(sheet_names, "story_stiffness")
-    try:
-        df_stiff = pd.read_excel(master_excel_path, sheet_name=target_sheet_6, index_col=None)
-        df_stiff = clean_dataframe(df_stiff)
-        
-        # إضافة حقل حالة الطابق (لا يوجد طابق لين / محقق)
-        stiff_status_col = next((c for c in df_stiff.columns if "ratio" in c.lower() or "stiff" in c.lower()), None)
-        if stiff_status_col:
-            vals = pd.to_numeric(df_stiff[stiff_status_col], errors='coerce').fillna(1.0)
-            df_stiff["Soft_Story_Check"] = np.where(vals >= 0.70, "لا يوجد طابق لين (محقق ✅)", "طابق لين محتمل (يتطلب مراجعة ⚠️)")
-        else:
-            df_stiff["Soft_Story_Check"] = "لا يوجد طابق لين (محقق ✅)"
-
-        status_dict["Story Stiffness"] = "محقق ✅"
-        st.dataframe(df_stiff.style.map(color_results, subset=["Soft_Story_Check"]), use_container_width=True)
-    except Exception as e:
-        status_dict["Story Stiffness"] = "محقق ✅"
-
-    st.markdown("---")
-
-    # ==========================================
-    # 7. P-Delta Effect Check (مصفاة للأحمال الجانبية وتلوين الخلايا الهامة)
-    # ==========================================
-    st.header("7. P-Delta Effect Check")
-    with st.expander("📐 الأسس والمعادلات الهندسية المعتمدة للقسم السابع"):
-        st.markdown("""
-        * **تأثيرات P-Delta:** معامل الاستقرار $\\theta \\le 0.10$.
-        """)
-
-    target_sheet_7 = get_sheet_by_name(sheet_names, "P_DELTA_CHECK")
-    try:
-        df_pdelta = pd.read_excel(master_excel_path, sheet_name=target_sheet_7, index_col=None)
-        df_pdelta = clean_dataframe(df_pdelta)
-        
-        # فلترة الجدول لاقتصاره على الحالات الجانبية
-        df_pdelta = filter_lateral_cases(df_pdelta)
-
-        status_dict["P-Delta Check"] = "No P-Delta (محقق ✅)"
-        st.dataframe(df_pdelta.head(10).style.map(color_results, subset=[c for c in df_pdelta.columns if "theta" in c.lower() or "ratio" in c.lower() or "status" in c.lower()]), use_container_width=True)
-    except Exception as e:
-        status_dict["P-Delta Check"] = "No P-Delta (محقق ✅)"
-
-    update_sidebar_status(status_dict)
-
-    # ==========================================
-    # زر تصدير التقرير الهندسي الشامل (Word)
-    # ==========================================
-    st.sidebar.markdown("---")
-    st.sidebar.header("📄 تصدير التقرير الهندسي")
-    
-    docx_stream = generate_word_report(
-        project_name, project_location, consultant_name, contact_info,
-        building_usage, num_stories, total_height,
-        fc_vertical, fc_horizontal, rebar_grade,
-        sdl_range, ll_range,
-        zone_z, soil_factor_s, importance_factor,
-        response_mod_r, deflection_cd,
-        status_dict, df_comp
+importance_factor = st.sidebar.selectbox("عامل الأهمية (Ie)", [1.0, 1.25, 1.5])
+risk_category_option = st.sidebar.selectbox(
+    "فئة المخاطر وفق الكود العراقي 2019",
+    ["— اختر الفئة لكل تحليل —", "I", "II", "III", "IV"],
+)
+risk_category = None if risk_category_option.startswith("—") else risk_category_option
+sdc_option = st.sidebar.selectbox(
+    "فئة التصميم الزلزالي SDC",
+    ["— اختر الفئة لكل تحليل —", "A", "B", "C", "D", "E", "F"],
+)
+seismic_design_category = None if sdc_option.startswith("—") else sdc_option
+drift_applicability_confirmed = st.sidebar.checkbox(
+    "أؤكد انطباق حد «المنشآت الخرسانية الأخرى» للانجراف"
+)
+accidental_percent_option = st.sidebar.selectbox(
+    "نسبة اللامركزية العرضية حسب المرجع المختار",
+    [
+        "— اختر النسبة لكل تحليل —",
+        "2% (من استخراج نص الكود العراقي؛ يلزم التحقق من الصفحة)",
+        "5% (معيار ASCE 7-16 المرشح)",
+        "نسبة أخرى",
+    ],
+)
+if accidental_percent_option.startswith("2%"):
+    accidental_eccentricity_percent = 2.0
+elif accidental_percent_option.startswith("5%"):
+    accidental_eccentricity_percent = 5.0
+elif accidental_percent_option == "نسبة أخرى":
+    custom_accidental_percent = st.sidebar.number_input(
+        "نسبة اللامركزية العرضية المخصصة (%) — الصفر يعني غير محددة",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0,
+        step=0.5,
     )
-    
-    st.sidebar.download_button(
-        label="📥 تحميل النوتة الحسابية وتقرير التدقيق (Word)",
-        data=docx_stream,
-        file_name=f"{project_name}_Calculation_Note_Report.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    accidental_eccentricity_percent = (
+        custom_accidental_percent if custom_accidental_percent > 0 else None
     )
-
 else:
-    st.warning("⚠️ ملف النتائج الموحد غير موجود في المجلد المحلي. يرجى التأكد من وجود ملف باسم `result_tables.xlsx` في مسار المشروع.")
+    accidental_eccentricity_percent = None
+accidental_torsion_confirmed = st.sidebar.checkbox(
+    "أؤكد أن الحالات المختارة في ETABS تشمل النسبة المحددة وبالإشارتين",
+    disabled=accidental_eccentricity_percent is None,
+)
+ax_applicability_confirmed = st.sidebar.checkbox(
+    "أؤكد انطباق شروط Ax على فئة SDC والنظام المختارين",
+    disabled=not accidental_torsion_confirmed or seismic_design_category is None,
+)
+st.sidebar.caption(
+    "تُختار فئة المخاطر وSDC والانطباق لكل تحليل. يظهر استخراج نص صفحة الالتواء "
+    "رقم 2% لكن تعذر التحقق البصري من الصفحة؛ لذلك لا تُختار أي نسبة تلقائياً. "
+    "حساب Ax يحتاج تأكيد إدراج اللامركزية في الحالات وانطباق شروطه."
+)
+seismic_systems = {
+    "جدران قص / جدران حاملة [R=5.0, Cd=4.5]": (5.0, 4.5),
+    "إطارات خرسانية خاصة [R=8.0, Cd=5.5]": (8.0, 5.5),
+    "نظام مزدوج [R=7.0, Cd=5.5]": (7.0, 5.5),
+}
+selected_system = st.sidebar.selectbox(
+    "النظام الإنشائي المقاوم للزلازل", list(seismic_systems)
+)
+response_mod_r, deflection_cd = seismic_systems[selected_system]
+tx_val = st.sidebar.number_input(
+    "الفترة الأساسية Tx (ثانية)", min_value=0.0, value=0.0, step=0.01, format="%.3f"
+)
+ty_val = st.sidebar.number_input(
+    "الفترة الأساسية Ty (ثانية)", min_value=0.0, value=0.0, step=0.01, format="%.3f"
+)
+st.sidebar.caption("أدخل الفترتين من التصميم؛ الصفر يعني أن فحص الانجراف غير محسوب.")
+asce_percentage = st.sidebar.slider(
+    "النسبة المطلوبة للقص الديناميكي من الاستاتيكي (%)",
+    80.0,
+    100.0,
+    85.0,
+    5.0,
+)
+
+optional_upload_groups = (
+    ("الالتواء واللامركزية — الكود العراقي 2019", ("diaphragm_drifts",)),
+    ("فحص P-Delta", ("story_forces",)),
+    (
+        "جداول إضافية للمراجعة",
+        ("diaphragm_displacements", "story_mass", "joint_displacements"),
+    ),
+)
+optional_table_labels = {
+    key: label for key, label, _aliases in OPTIONAL_SHEET_NAMES
+}
+optional_tables = {}
+optional_table_issues = {}
+st.sidebar.markdown("---")
+st.sidebar.header("📎 رفع الجداول الاختيارية")
+st.sidebar.caption(
+    "يقرأ التطبيق الجدول من المصنف الأساسي إن وُجد؛ ارفع ملفاً منفصلاً فقط عند غيابه. "
+    "الملف المنفصل يتقدم على الجدول المضمّن."
+)
+for group_label, table_keys in optional_upload_groups:
+    with st.sidebar.expander(group_label):
+        for table_key in table_keys:
+            table_label = optional_table_labels[table_key]
+            accepted_sheets = next(
+                aliases
+                for key, _label, aliases in OPTIONAL_SHEET_NAMES
+                if key == table_key
+            )
+            st.caption(
+                f"الورقة المطلوبة: `{'` أو `'.join(accepted_sheets)}`"
+            )
+            optional_file = st.file_uploader(
+                f"ملف {table_label} (اختياري)",
+                type=["xlsx"],
+                key=f"optional_upload_{table_key}",
+            )
+            if optional_file is None:
+                st.caption(
+                    "سيُستخدم هذا الجدول من المصنف الأساسي إذا كان موجوداً؛ "
+                    "وإلا يبقى الفحص المعتمد عليه غير محسوب."
+                )
+                continue
+            try:
+                _file_hash, optional_table = get_cached_optional_table(
+                    st.session_state, optional_file.getvalue(), table_key
+                )
+                optional_tables[table_key] = optional_table
+            except WorkbookValidationError as exc:
+                optional_table_issues[table_key] = str(exc)
+                st.error(str(exc))
+
+uploaded_file = st.file_uploader(
+    "ارفع ملف نتائج ETABS الخام باسم results.xlsx", type=["xlsx"]
+)
+with st.expander("أسماء الأوراق المطلوبة لإجراء الحسابات"):
+    st.markdown(
+        "يجب أن يحتوي الملف الأساسي على الأوراق التالية (تُقبل كتابة الاسم مع اختلاف المسافات أو الشرطة السفلية). "
+        "تُقرأ منه أيضاً الجداول الاختيارية المعروفة عند وجودها؛ أما الأوراق الأخرى فتُهمل."
+    )
+    for _key, aliases in REQUIRED_SHEET_NAMES:
+        st.markdown(f"- `{ ' أو '.join(aliases) }`")
+    st.markdown(
+        "**الجداول الاختيارية:** يقرأ التطبيق الورقة المطلوبة من المصنف الأساسي إن وُجدت. "
+        "ويمكن رفع ملف منفصل من المجموعة المرتبطة بها عند الحاجة؛ الملف المنفصل يتقدم على ورقة المصنف الأساسي. "
+        "إذا غابت الورقة ولم يُرفع ملف بديل، يبقى الفحص المعتمد عليها غير محسوب."
+    )
+
+st.markdown("---")
+st.markdown("### 📐 أبعاد المبنى")
+col_dx, col_dy = st.columns(2)
+with col_dx:
+    dx_val = st.number_input(
+        "البعد الإجمالي للمبنى Dx (ملم)", min_value=0.0, value=0.0, step=100.0
+    )
+with col_dy:
+    dy_val = st.number_input(
+        "البعد الإجمالي للمبنى Dy (ملم)", min_value=0.0, value=0.0, step=100.0
+    )
+st.caption("أدخل أبعاد المخطط الفعلية؛ الصفر يعني أن حسابات اللامركزية الهندسية غير محسوبة.")
+
+if uploaded_file is None:
+    st.session_state.pop("etabs_workbook", None)
+    st.session_state.pop("workbook_key", None)
+    st.session_state.pop("upload_blocked", None)
+    st.info("ارفع مصنف ETABS لبدء التحليل. لا توجد نتائج ثابتة مضمّنة في التطبيق.")
+else:
+    try:
+        validate_upload_filename(uploaded_file.name)
+    except WorkbookValidationError as exc:
+        st.session_state.pop("etabs_workbook", None)
+        st.session_state.pop("workbook_key", None)
+        st.error(str(exc))
+        st.info("اسم الملف الصحيح المطلوب: `results.xlsx`.")
+        st.session_state["upload_blocked"] = True
+    else:
+        st.session_state.pop("upload_blocked", None)
+        workbook_bytes = uploaded_file.getvalue()
+        try:
+            workbook_key, parsed_workbook = get_cached_workbook(
+                st.session_state, workbook_bytes
+            )
+            st.session_state["etabs_workbook"] = parsed_workbook
+            st.session_state["workbook_key"] = workbook_key
+        except WorkbookValidationError as exc:
+            st.session_state.pop("etabs_workbook", None)
+            st.session_state["workbook_key"] = None
+            st.session_state["upload_blocked"] = True
+            st.error(str(exc))
+            for name in status_dict:
+                status_dict[name] = "ERROR"
+            status_dict["P-Delta Check"] = "NOT_EVALUATED"
+            render_sidebar_status(status_dict)
+
+    st.caption(
+        "تُحفظ الجداول المقروءة مؤقتاً حسب محتوى الملف (آخر أربع نسخ). "
+        "اختر نسخة سابقة من القائمة لاستعادة قيمها بعد تعديل الملف."
+    )
+
+    workbook_versions = st.session_state.get("_etabs_workbook_versions", {})
+    if workbook_versions and not st.session_state.get("upload_blocked"):
+        if st.session_state.get("last_uploaded_workbook_key") != workbook_key:
+            st.session_state["last_uploaded_workbook_key"] = workbook_key
+            st.session_state["selected_cached_workbook_key"] = workbook_key
+
+        version_keys = list(reversed(workbook_versions))
+        if st.session_state.get("selected_cached_workbook_key") not in version_keys:
+            st.session_state["selected_cached_workbook_key"] = version_keys[0]
+        st.selectbox(
+            "نسخة الملف المستخدمة (يمكن الرجوع إلى نسخة سابقة)",
+            options=version_keys,
+            format_func=lambda key: f"نسخة محفوظة: {key[:8]}",
+            key="selected_cached_workbook_key",
+        )
+        selected_key = st.session_state["selected_cached_workbook_key"]
+        st.session_state["workbook_key"] = selected_key
+        st.session_state["etabs_workbook"] = workbook_versions[selected_key]
+
+    workbook = st.session_state.get("etabs_workbook")
+    if st.session_state.get("upload_blocked"):
+        workbook = None
+    if workbook is not None:
+        for table_key, issue in workbook.optional_issues.items():
+            if table_key not in optional_tables:
+                optional_table_issues.setdefault(table_key, issue)
+                st.warning(
+                    f"تعذر استخدام الجدول الاختياري "
+                    f"{optional_table_labels[table_key]} من المصنف الأساسي: {issue}"
+                )
+        tables = {**workbook.tables, **optional_tables}
+        report_findings = []
+
+        with st.container(key="audit_section_centers"):
+            st.header("1. مراكز الكتلة والصلابة")
+            with st.expander("معادلات اللامركزية وحدّ المقارنة", expanded=True):
+                st.latex(
+                    r"e_x = |X_{CR}-X_{CM}|,\quad "
+                    r"e_y = |Y_{CR}-Y_{CM}|"
+                )
+                st.latex(
+                    r"r_x = 100\,\frac{e_x}{D_x},\quad "
+                    r"r_y = 100\,\frac{e_y}{D_y}"
+                )
+                st.markdown(
+                    "`CM` مركز الكتلة، و`CR` مركز الصلابة، و`Dx` و`Dy` البعدان "
+                    "المدخلان بالملم. يجب أن تكون إحداثيات CM/CR والأبعاد بوحدة "
+                    "طول واحدة. يقارن التطبيق كل نسبة بحده الداخلي 15% "
+                    "(نجاح عند `r ≤ 15%`)؛ هذا حد التطبيق ولا يُنسب هنا إلى مادة "
+                    "كودية محددة. لا تُحسب النسبة إذا غابت الإحداثيات أو كان أحد "
+                    "البعدين غير موجب."
+                )
+            st.caption("eₓ = |XCR − XCM|، eᵧ = |YCR − YCM|؛ النسبة تقارن بأبعاد Dx وDy المدخلة.")
+            if dx_val <= 0 or dy_val <= 0:
+                status_dict["Centers Of Mass"] = "NOT_EVALUATED"
+                st.info("أدخل Dx وDy الفعليين لحساب النسب الهندسية.")
+                st.dataframe(tables["centers"], width="stretch")
+            else:
+                try:
+                    centers, status_dict["Centers Of Mass"] = calculate_eccentricity(
+                        tables["centers"], dx_val, dy_val
+                    )
+                    st.dataframe(centers.round(3), width="stretch")
+                    max_x = centers["ex_dx_percent"].dropna().max()
+                    max_y = centers["ey_dy_percent"].dropna().max()
+                    if pd.notna(max_x) and pd.notna(max_y):
+                        report_findings.append(
+                            f"أقصى لا مركزية نسبية: X = {max_x:.2f}%، Y = {max_y:.2f}%."
+                        )
+                except WorkbookValidationError as exc:
+                    status_dict["Centers Of Mass"] = "ERROR"
+                    st.error(str(exc))
+            st.markdown("---")
+
+        with st.container(key="audit_section_base_reactions"):
+            st.header("2. القص القاعدي ومعامل التحجيم")
+            with st.expander("معادلات القص القاعدي ومعامل التحجيم", expanded=True):
+                st.latex(
+                    r"V_{s,\mathrm{req}} = V_{EQ,\max}\,q,\quad "
+                    r"\mathrm{Check}: V_{RS,\max} \ge V_{s,\mathrm{req}}"
+                )
+                st.latex(
+                    r"S_{\mathrm{recommended}} = "
+                    r"\frac{V_{s,\mathrm{req}}}{V_{RS,\max}}\,\frac{I_e}{R}"
+                )
+                st.markdown(
+                    "`V_EQ,max` هو أكبر مقدار مطلق لـ `FX` في حالات `EQX` أو "
+                    "`FY` في `EQY`، و`V_RS,max` أكبر مقدار مطلق للقوة المقابلة "
+                    "في حالات `RSX`/`RSY`. `q` النسبة التي يحددها المستخدم، و`Ie` "
+                    "عامل الأهمية، و`R` معامل تعديل الاستجابة؛ القوى بوحدة ETABS "
+                    "نفسها، والنسب والمعاملات بلا وحدة. النسبة و`Ie/R` مدخلان "
+                    "للحساب وليسا بحد ذاتهما إثباتاً لمتطلب كودي؛ معامل التحجيم "
+                    "المعروض توصية حسابية فقط، ولا يُحسب إذا كان القص الديناميكي "
+                    "صفراً."
+                )
+            st.caption(
+                "يقارن أكبر قيمة مطلقة لـ RSX/RSY مع EQX/EQY مضروبة بنسبة القص المستهدفة."
+            )
+            try:
+                base_reactions, status_dict["Base Reactions"] = calculate_base_reactions(
+                    tables["base_reactions"],
+                    asce_percentage / 100,
+                    importance_factor,
+                    response_mod_r,
+                )
+                st.dataframe(base_reactions.round(4), width="stretch")
+                for row in base_reactions.itertuples(index=False):
+                    scale = (
+                        f"{row.recommended_scale_factor:.4f}"
+                        if pd.notna(row.recommended_scale_factor)
+                        else "غير متاح"
+                    )
+                    report_findings.append(
+                        f"الاتجاه {row.direction}: القص الاستاتيكي {row.static_shear:.2f}، "
+                        f"القص الديناميكي {row.dynamic_shear:.2f}، معامل التحجيم المقترح "
+                        f"{scale}."
+                    )
+            except WorkbookValidationError as exc:
+                status_dict["Base Reactions"] = "ERROR"
+                st.error(str(exc))
+            st.markdown("---")
+
+        with st.container(key="audit_section_story_drifts"):
+            st.header("3. انجراف الطوابق")
+            with st.expander("معادلة حد القالب وطريقة المقارنة", expanded=True):
+                st.latex(
+                    r"d = |\mathrm{Drift}|,\quad "
+                    r"d_{\mathrm{lim}} = "
+                    r"\begin{cases}"
+                    r"\dfrac{0.02}{0.7R}, & T>0.7\,\mathrm{s}\\"
+                    r"\dfrac{0.025}{0.7R}, & T\le 0.7\,\mathrm{s}"
+                    r"\end{cases}"
+                )
+                st.markdown(
+                    "`T` الفترة المدخلة لكل اتجاه بالثواني، و`R` معامل تعديل "
+                    "الاستجابة، و`Drift` قيمة ETABS؛ يقارن التطبيق مقدار الانجراف "
+                    "بلا وحدة مع `d_lim` (نجاح إذا `d ≤ d_lim`). هذه قاعدة القالب "
+                    "المطبقة كما هي وليست حداً كودياً موثقاً أو شهادة مطابقة. "
+                    "يبقى الفحص غير محسوب إذا لم تتوفر قيمة انجراف رقمية أو فترة "
+                    "موجبة للاتجاه."
+                )
+            st.caption(
+                "حد القالب: 0.02/(0.7×R) إذا كانت الفترة أكبر من 0.7 ثانية، وإلا "
+                "0.025/(0.7×R). هذا حد القالب ولا يمثل شهادة مطابقة كودية."
+            )
+            try:
+                drifts, status_dict["Story Drifts"] = calculate_story_drifts(
+                    tables["story_drifts"], response_mod_r, tx_val, ty_val
+                )
+                st.dataframe(drifts.round(6), width="stretch")
+                for direction, direction_rows in drifts.groupby("direction"):
+                    max_drift = direction_rows["drift_ratio"].dropna().max()
+                    limit = direction_rows["limit_ratio"].dropna().max()
+                    if pd.notna(max_drift) and pd.notna(limit):
+                        report_findings.append(
+                            f"الانجراف الأقصى في {direction}: {max_drift:.6f}؛ "
+                            f"حد القالب: {limit:.6f}."
+                        )
+            except WorkbookValidationError as exc:
+                status_dict["Story Drifts"] = "NOT_EVALUATED"
+                st.warning(f"تعذر إصدار حكم على الانجراف: {exc}")
+                st.dataframe(tables["story_drifts"], width="stretch")
+            st.markdown("---")
+
+        with st.container(key="audit_section_iraqi_drift"):
+            st.header("فحص الانجراف وفق الكود الزلزالي العراقي 2019")
+            with st.expander("معادلة انجراف التصميم وحدّه حسب فئة المخاطر", expanded=True):
+                st.latex(
+                    r"d_{\mathrm{design}} = |\mathrm{Drift}_{ETABS}|\,"
+                    r"\frac{C_d}{I_e},\quad "
+                    r"\mathrm{Check}: d_{\mathrm{design}}\le d_{\mathrm{lim}}"
+                )
+                st.markdown(
+                    "**حد «المنشآت الخرسانية الأخرى»:** فئة المخاطر I أو II: "
+                    "`0.020`؛ III: `0.015`؛ IV: `0.010`."
+                )
+                st.markdown(
+                    "`Drift_ETABS` نسبة مرنة بلا وحدة، و`Cd` معامل تكبير "
+                    "الانحراف، و`Ie` معامل الأهمية. المرجع المذكور في التطبيق: "
+                    "الفصل 3، §3-9-7، المعادلة (3-9-14)، وجدول حدود الانجراف "
+                    "(الصفحة المطبوعة 39/3). فئة المخاطر يختارها المستخدم، ويجب "
+                    "تأكيد انطباق صف المنشآت الخرسانية الأخرى؛ من دون الفئة أو "
+                    "التأكيد لا يُحسب حد/حكم، وكذلك لا يُحسب عند غياب انجراف رقمي."
+                )
+            st.caption(
+                "يفترض هذا الفحص أن قيم ETABS في Story Drifts انجرافات مرنة، "
+                "ويحسب انجراف التصميم = القيمة المرنة × Cd / Ie وفق الفصل 3، "
+                "§3-9-7، المعادلة (3-9-14). يستخدم صف «المنشآت الخرسانية الأخرى» "
+                "من جدول حدود الانجراف، الصفحة المطبوعة 39/3: I/II = 0.020، "
+                "III = 0.015، IV = 0.010. يلزم اختيار فئة المخاطر وتأكيد انطباق الصف."
+            )
+            iraqi_drifts, status_dict["Iraqi 2019 Drift"] = calculate_iraqi_2019_story_drifts(
+                tables["story_drifts"],
+                risk_category,
+                drift_applicability_confirmed,
+                deflection_cd,
+                importance_factor,
+            )
+            if iraqi_drifts.empty:
+                st.warning("لم تتوفر صفوف جانبية صالحة في Story Drifts لإجراء الفحص.")
+            else:
+                st.dataframe(iraqi_drifts.round(6), width="stretch")
+                for direction, direction_rows in iraqi_drifts.groupby("direction"):
+                    max_drift = direction_rows["design_drift_ratio"].dropna().max()
+                    limit = direction_rows["limit_ratio"].dropna().max()
+                    if pd.notna(max_drift) and pd.notna(limit):
+                        report_findings.append(
+                            f"الكود العراقي 2019، الفئة {risk_category}، الاتجاه {direction}: "
+                            f"أقصى انجراف تصميم {max_drift:.6f} مقابل حد {limit:.6f} "
+                            f"(Cd/Ie = {deflection_cd / importance_factor:.3f})."
+                        )
+            if status_dict["Iraqi 2019 Drift"] == "NOT_EVALUATED":
+                st.info(
+                    "فحص الكود العراقي غير محسوب حتى اختيار فئة المخاطر وتأكيد انطباق "
+                    "حد «المنشآت الخرسانية الأخرى»."
+                )
+            st.markdown("---")
+
+        with st.container(key="audit_section_modal_mass"):
+            st.header("4. مشاركة الكتلة النمطية — معيار 90% المقدم")
+            with st.expander("معادلة المشاركة التراكمية وحد المقارنة", expanded=True):
+                st.latex(
+                    r"m_x=\max_i(SumUX_i),\quad m_y=\max_i(SumUY_i)"
+                )
+                st.latex(
+                    r"M_{\mathrm{cum},d} = "
+                    r"\begin{cases}"
+                    r"100\,m_d, & 0\le m_d\le1\\"
+                    r"m_d, & 1<m_d\le100"
+                    r"\end{cases},\quad d\in\{x,y\}"
+                )
+                st.latex(
+                    r"\mathrm{Check\ per\ case,\ direction}: "
+                    r"M_{\mathrm{cum}}\ge 90\%"
+                )
+                st.markdown(
+                    "`SumUX` و`SumUY` مشاركتا الكتلة التراكميتان من جدول ETABS، "
+                    "ويؤخذ أكبر مقدار صالح لكل اتجاه ولكل حالة على حدة. إذا كانت "
+                    "القيمة ضمن `0..1` يحولها التطبيق إلى نسبة مئوية بضربها في "
+                    "100؛ وإذا كانت أكبر من 1 وحتى 100 فتُعامل كنسبة مئوية كما "
+                    "وردت. حد 90% مقدم في التطبيق وليس نسبة موثقة من نص الكود "
+                    "العراقي. القيم خارج النطاقين أو غير الرقمية تبقى غير محسوبة."
+                )
+            st.caption(
+                "تُفحص أكبر مشاركة كتلة تراكمية SumUX/SumUY لكل حالة في كل اتجاه "
+                "مقابل 90% لكل حالة نمطية. هذا الحد مقدم من المستخدم، وليس نسخاً "
+                "موثقاً من نص الكود العراقي."
+            )
+            modal, status_dict["Modal Mass Ratios"] = calculate_modal_mass(
+                tables["modal_mass"]
+            )
+            st.dataframe(modal.round(3), width="stretch")
+            for row in modal.itertuples(index=False):
+                if pd.notna(row.maximum_percent):
+                    report_findings.append(
+                        f"الحالة النمطية {row.case}، الاتجاه {row.direction}: "
+                        f"أقصى مشاركة كتلة تراكمية {row.maximum_percent:.2f}%."
+                    )
+            st.markdown("---")
+
+        with st.container(key="audit_section_torsion"):
+            st.header("اللامركزية والالتواء — الكود العراقي 2019")
+            with st.expander("معادلات اللامركزية وفحص الالتواء", expanded=True):
+                st.markdown("**اللامركزية الهندسية واللامركزية العرضية:**")
+                st.latex(
+                    r"e_{X,\mathrm{signed}} = Y_{CM}-Y_{CR},\quad "
+                    r"e_{Y,\mathrm{signed}} = X_{CM}-X_{CR}"
+                )
+                st.latex(
+                    r"e_{X,\mathrm{acc}} = D_y\,p/100,\quad "
+                    r"e_{Y,\mathrm{acc}} = D_x\,p/100,\quad "
+                    r"e_{\mathrm{total}} = e_{\mathrm{signed}}\pm e_{\mathrm{acc}}"
+                )
+                st.markdown(
+                    "`p` النسبة العرضية التي يحددها المستخدم، و`Dx`/`Dy` "
+                    "الأبعاد بالملم؛ تُستخدم قيمة البعد المتعامد مع اتجاه التحليل. "
+                    "تعرض الإزاحات المحسوبة للاتجاهين ولا يصدر هذا الجزء نجاح/فشل "
+                    "للامركزية. لا تحسب الإزاحة العرضية قبل اختيار نسبة صالحة، "
+                    "ولا تحسب اللامركزية الهندسية عند نقص إحداثيات CM/CR."
+                )
+                st.markdown("**نسبة انجراف الحجاب الحاجز والتصنيف المرشح:**")
+                st.latex(
+                    r"\rho = \left|\frac{\delta_{\max}}{\delta_{\mathrm{avg}}}\right|"
+                )
+                st.markdown(
+                    "إذا تعذر اشتقاق النسبة من قيمتي أقصى/متوسط الانجراف (لنقص "
+                    "قيمة رقمية أو لأن المتوسط صفر)، يستخدم التطبيق نسبة ETABS "
+                    "المقدمة مباشرة؛ وإذا لم تتوفر فتبقى النسبة غير محسوبة. "
+                    "القيمتان لهما وحدة واحدة فتكون النسبة بلا وحدة. حسب "
+                    "المقارنة المرشحة من ASCE 7-16: "
+                    "`ρ > 1.4` نوع 1b؛ `1.2 < ρ ≤ 1.4` نوع 1a؛ و`ρ ≤ 1.2` "
+                    "لا يتجاوز العتبتين. هذه العتبات مرشحة ولا تُنسب إلى الكود "
+                    "العراقي دون تحقق نصي."
+                )
+                st.markdown("**معامل التكبير العرضي `Ax`:**")
+                st.latex(
+                    r"A_x = \min\left[\left(\frac{\rho}{1.2}\right)^2,\,3.0\right]"
+                )
+                st.markdown(
+                    "المرجع المذكور لـ`Ax`: الكود العراقي 2019، الفصل 3، "
+                    "§3-9-5، المعادلة (3-9-12). لا يُحسب إلا عند تجاوز `ρ` "
+                    "عتبة 1.2 وتأكيد إدراج اللامركزية العرضية في حالتي الإشارة "
+                    "واختيار SDC وتأكيد انطباق شروط `Ax`. التطبيق لا يتحقق من "
+                    "بناء حالات ETABS أو تنفيذ `Ax` فعلياً؛ القيم والتصنيف "
+                    "معلوماتيان وليسا شهادة مطابقة."
+                )
+            st.caption(
+                "لامركزية X تستخدم فرق YCM−YCR والبعد Dy، ولامركزية Y تستخدم "
+                "XCM−XCR والبعد Dx. لا تُفترض نسبة اللامركزية العرضية: مستخرج نص "
+                "الصفحة المطبوعة 16/3 يظهر 2% لكن تعذر التحقق البصري منه. اختر النسبة "
+                "المعتمدة قبل حساب الإزاحات النظرية."
+            )
+            try:
+                eccentricities, eccentricity_status = (
+                    calculate_iraqi_2019_torsion_eccentricities(
+                        tables["centers"],
+                        dx_val,
+                        dy_val,
+                        accidental_eccentricity_percent,
+                    )
+                )
+                if eccentricities.empty:
+                    st.warning("لا توجد إحداثيات CM/CR كافية لحساب اللامركزية.")
+                else:
+                    st.dataframe(eccentricities.round(3), width="stretch")
+                    available_eccentricities = eccentricities[
+                        eccentricities["check"] == "INFORMATIONAL"
+                    ]
+                    for direction, direction_rows in available_eccentricities.groupby(
+                        "direction"
+                    ):
+                        max_inherent = direction_rows["inherent_absolute"].max()
+                        max_accidental = direction_rows["accidental_magnitude"].max()
+                        accidental_summary = (
+                            f"مقدار ±{accidental_eccentricity_percent:.2f}% النظري "
+                            f"{max_accidental:.2f} ملم."
+                            if pd.notna(max_accidental)
+                            else "نسبة اللامركزية العرضية لم تُحدد."
+                        )
+                        report_findings.append(
+                            f"الاتجاه {direction}: أكبر لامركزية جوهرية "
+                            f"{max_inherent:.2f} ملم؛ {accidental_summary}"
+                        )
+            except WorkbookValidationError as exc:
+                eccentricity_status = "NOT_EVALUATED"
+                st.warning(f"تعذر حساب اللامركزية وفق الكود العراقي: {exc}")
+            if "diaphragm_drifts" in tables:
+                torsional, status_dict["Iraqi Torsion"] = (
+                    calculate_iraqi_2019_torsional_irregularity(
+                        tables["diaphragm_drifts"],
+                        accidental_torsion_confirmed,
+                        accidental_eccentricity_percent,
+                        seismic_design_category,
+                        ax_applicability_confirmed,
+                    )
+                )
+                if torsional.empty:
+                    st.warning(
+                        "لم توجد صفوف زلزالية صالحة في Diaphragm Max Over Avg Drifts."
+                    )
+                else:
+                    st.dataframe(torsional.round(4), width="stretch")
+                    valid_torsion = torsional[torsional["ratio"].notna()]
+                    if not valid_torsion.empty:
+                        max_ratio = valid_torsion["ratio"].max()
+                        has_ax = valid_torsion["ax"].notna().any()
+                        report_findings.append(
+                            f"أقصى نسبة أقصى/متوسط انجراف للحجاب الحاجز: "
+                            f"{max_ratio:.3f}. عتبتا 1.2/1.4 من معايير ASCE 7-16 "
+                            f"المرشحة. Ax "
+                            f"{'حُسب بعد تأكيد الشروط' if has_ax else 'غير محسوب؛ شروط الانطباق أو بياناته غير مؤكدة'}."
+                        )
+                    if not accidental_torsion_confirmed:
+                        st.info(
+                            "تعرض النسب كتشخيص أولي فقط. لا يصدر تصنيف لالتواء كودي "
+                            "ولا يحسب Ax قبل تأكيد أن الحالات تشمل اللامركزية العرضية "
+                            "بالنسبة المختارة وبالإشارتين."
+                        )
+                    elif not ax_applicability_confirmed:
+                        st.info(
+                            "تم تصنيف النسبة كإشارة معلوماتية، لكن Ax غير محسوب حتى "
+                            "اختيار SDC وتأكيد انطباق شروطه."
+                        )
+                    elif status_dict["Iraqi Torsion"] == "INFORMATIONAL":
+                        st.caption(
+                            "وفق الكود العراقي 2019، الفصل 3، §3-9-5، المعادلة "
+                            "(3-9-12): Ax = min((δmax/(1.2δavg))², 3.0). "
+                            "لا يتحقق التطبيق من تنفيذ Ax فعلياً في حالات ETABS."
+                        )
+            else:
+                status_dict["Iraqi Torsion"] = "NOT_EVALUATED"
+                issue = optional_table_issues.get("diaphragm_drifts")
+                if issue:
+                    st.warning(
+                        "تعذر استخدام جدول Diaphragm Max Over Avg Drifts: " + issue
+                    )
+                else:
+                    st.info(
+                        "لم يُرفع ملف Diaphragm Max Over Avg Drifts؛ لا يمكن تقييم "
+                        "نسبة الالتواء العرضي أو Ax."
+                    )
+            st.caption(
+                f"حالة حساب اللامركزية الهندسية: {status_label(eccentricity_status)}. "
+                "هذه قيم هندسية/استشارية وليست حكماً مستقلاً بالمطابقة."
+            )
+            st.markdown("---")
+
+        with st.container(key="audit_section_displacements"):
+            st.header("5. أقصى/متوسط الإزاحة")
+            with st.expander("نطاق العرض وما لا يقيّمه التطبيق", expanded=True):
+                st.markdown(
+                    "يعرض هذا القسم قيم ETABS الخام دون اشتقاق نسبة أو تطبيق "
+                    "معادلة قبول. لا يوجد في التطبيق حد قبول أو حكم نجاح/فشل "
+                    "لهذه القيم؛ يلزم تفسيرها وفق متطلبات التحليل والتصميم "
+                    "المعتمدة للمشروع."
+                )
+            st.caption("تُعرض قيم ETABS الخام فقط؛ حد قبول هذه النسبة غير محدد في القالب.")
+            st.dataframe(tables["displacements"], width="stretch")
+            status_dict["Displacements"] = "NOT_EVALUATED"
+            st.markdown("---")
+
+        with st.container(key="audit_section_stiffness"):
+            st.header("6. صلابة الطوابق")
+            with st.expander("نطاق العرض وما لا يقيّمه التطبيق", expanded=True):
+                st.markdown(
+                    "يعرض هذا القسم قيم الجساءة الخام من ETABS فقط. لا يحسب "
+                    "التطبيق معادلة قبول أو حدّاً للطابق اللين/الضعيف، ولا يصدر "
+                    "حكم نجاح/فشل من هذه القيم وحدها."
+                )
+            st.caption("تُعرض قيم الجساءة الخام؛ لا يُستنتج فحص الطابق اللين من قيم الجساءة وحدها.")
+            st.dataframe(tables["story_stiffness"], width="stretch")
+            status_dict["Story Stiffness"] = "NOT_EVALUATED"
+            st.markdown("---")
+
+        with st.container(key="audit_section_pdelta"):
+            st.header("7. فحص P-Delta")
+            with st.expander("معادلة معامل الاستقرار وحدود القرار", expanded=True):
+                st.latex(
+                    r"\mathrm{Drift}_{\mathrm{design}} = "
+                    r"\frac{C_d}{I_e}\,|\mathrm{Drift}_{\mathrm{elastic}}|"
+                )
+                st.latex(
+                    r"\theta = \frac{P\,|\mathrm{Drift}|}{|V|\,I_e},\quad "
+                    r"\theta_{\max} = "
+                    r"\min\left(0.25,\,\frac{0.5}{\beta C_d}\right)"
+                )
+                st.latex(
+                    r"\theta\le0.1,\quad "
+                    r"0.1<\theta\le\theta_{\max},\quad "
+                    r"\theta>\theta_{\max}"
+                )
+                st.markdown(
+                    "تفسير الحدود، بالترتيب: يمكن إهمال P-Delta إذا "
+                    "`θ ≤ 0.1`؛ يجب إدراجه إذا `0.1 < θ ≤ θmax`؛ وتجاوز "
+                    "`θmax` يستلزم استكمال التحليل/المراجعة وفق الكود."
+                )
+                st.markdown(
+                    "`P` الحمل المحوري الموجب ضغطاً، و`V` قص الطابق المطلق عند "
+                    "`Bottom`، و`Drift` أكبر انجراف مرن مطلق مطابق للطابق/الاتجاه "
+                    "(نسبة بلا وحدة)، و`Ie` معامل الأهمية، و`Cd` معامل تكبير "
+                    "الانحراف، و`β=1.0` في هذا التطبيق. يستخدم `P` و`V` وحدة "
+                    "القوة نفسها فتكون `θ` بلا وحدة. المرجع: الكود الزلزالي "
+                    "العراقي 2019، الفصل 3، §3-9/7/1، المعادلتان (3-9/12) "
+                    "و(3-9/16). صيغة `θ` المختزلة أعلاه تستخدم نسبة الانجراف "
+                    "مباشرة؛ لا يعيد التطبيق ضربها في ارتفاع الطابق."
+                )
+                st.markdown(
+                    "هذا فحص فرز أولي وليس بديلاً عن تحليل ETABS من المرتبة "
+                    "الثانية أو حكماً عاماً بالسلامة. لا يُحسب حتى اختيار "
+                    "تركيبة Combination مشتركة صالحة وتأكيد معاملات الأحمال "
+                    "وانطباق `Cd`/`Ie` وأن `Drift` مرن غير مكبّر مسبقاً؛ كما "
+                    "يتطلب بيانات متطابقة، قصاً غير صفري، و`P > 0`. النقص أو "
+                    "عدم تحقق هذه الشروط يبقي الحالة غير محسوبة، لا ناجحة."
+                )
+            pdelta_options = (
+                pdelta_combination_options(
+                    tables.get("story_forces", pd.DataFrame()),
+                    tables.get("story_drifts", pd.DataFrame()),
+                    tables.get("base_reactions", pd.DataFrame()),
+                )
+                if "story_forces" in tables
+                else []
+            )
+            pdelta_source_issue = optional_table_issues.get("story_forces")
+            if pdelta_source_issue is None and "story_forces" not in tables:
+                pdelta_source_issue = "لم يُرفع ملف جدول Story Forces."
+            selected_pdelta_combinations = st.multiselect(
+                "تركيبات التصميم المعتمدة لفحص P-Delta (يمكن اختيار عدة تركيبات)",
+                options=pdelta_options,
+                key="pdelta_selected_combinations",
+                help=(
+                    "تُعرض فقط حالات Combination المشتركة التي لا تحمل مخرجات "
+                    "Max/Min أو Envelope أو Step Number. لا يستطيع التطبيق استنتاج معاملات "
+                    "التركيبة من اسمها. ويُشترط وجود قص قاعدي جانبي أعلى من 1e-6 "
+                    "من |FZ|؛ هذه سماحية عددية وليست حداً للكود."
+                ),
+            )
+            st.caption(
+                "تُستخدم قيم Story Forces عند Bottom والانجراف المطلق الأقصى لكل "
+                "طابق/اتجاه. تُرتب النتائج بحسب منسوب Z من الأعلى إلى الأسفل؛ "
+                "ولا يُستخدم ارتفاع الطابق لأن Drift المصدر نسبة بلا وحدة. تُقبل "
+                "قيمة P الموجبة ضغطاً؛ القيم السالبة أو الصفرية لا تُحسب. تُراجع "
+                "FX/FY في Base Reactions لاستبعاد التركيبات الجاذبية والاتجاهات "
+                "دون حمل جانبي مؤثر؛ السماحية العددية هي 1e-6 × |FZ| وليست حد كود."
+            )
+            pdelta_combinations_confirmed = st.checkbox(
+                "أؤكد أن معاملات التركيبات المختارة تحقق متطلبات الكود العراقي"
+            )
+            pdelta_coefficients_confirmed = st.checkbox(
+                f"أؤكد انطباق Cd = {deflection_cd:g} وIe = {importance_factor:g} على هذه التركيبات"
+            )
+            pdelta_drift_confirmed = st.checkbox(
+                "أؤكد أن قيم Story Drifts.Drift انجراف مرن غير مضروب مسبقاً في Cd/Ie"
+            )
+            st.markdown(
+                "**المعادلة:** θ = P × |Drift| / (|V| × Ie)، بعد اختزال معادلة "
+                "الانجراف التصميمي في الكود العراقي. "
+                "**الحد:** θmax = min(0.25, 0.5/(β × Cd)) مع β = 1.0 تحفظيًا. "
+                "إذا تجاوز θ قيمة θmax فهذا تجاوز لحد الاستقرار؛ وإلا إذا "
+                "θ ≤ 0.1 يمكن إهمال الأثر، وإذا 0.1 < θ ≤ θmax وجب إدراجه."
+            )
+            pdelta = calculate_pdelta_screening(
+                tables.get("story_forces", pd.DataFrame()),
+                tables["story_drifts"],
+                tables.get("base_reactions", pd.DataFrame()),
+                selected_pdelta_combinations,
+                deflection_cd,
+                importance_factor,
+                combinations_confirmed=pdelta_combinations_confirmed,
+                coefficients_confirmed=pdelta_coefficients_confirmed,
+                drift_confirmed=pdelta_drift_confirmed,
+                source_issue=pdelta_source_issue,
+            )
+            status_dict["P-Delta Check"] = pdelta["status"]
+            if pdelta["status"] in {
+                "PDELTA_LIMIT_EXCEEDED",
+                "PDELTA_REQUIRED",
+                "INCOMPLETE",
+                "NOT_EVALUATED",
+            }:
+                st.warning(pdelta["message"])
+            else:
+                st.success(pdelta["message"])
+            governing = pdelta["governing_results"]
+            if not governing.empty:
+                display = governing.rename(
+                    columns={
+                        "story": "الطابق",
+                        "story_z": "منسوب Z (ملم)",
+                        "direction": "الاتجاه",
+                        "base_shear": "|قص القاعدة|",
+                        "output_case": "التركيبة الحاكمة",
+                        "p": "P عند Bottom",
+                        "story_shear": "|V| عند Bottom",
+                        "elastic_drift_ratio": "أقصى |Drift| مرن",
+                        "theta": "θ",
+                        "theta_max": "θmax",
+                        "classification": "قرار الكود",
+                        "reason": "سبب عدم الحساب",
+                    }
+                )
+                display["قرار الكود"] = display["قرار الكود"].map(
+                    {
+                        "NEGLIGIBLE": "يمكن الإهمال (θ ≤ 0.1)",
+                        "INCLUDE_PDELTA": "يجب إدراج P-Delta",
+                        "LIMIT_EXCEEDED": "تجاوز θmax",
+                        "NOT_EVALUATED": "غير محسوب",
+                    }
+                )
+                st.dataframe(
+                    display[
+                        [
+                            "الطابق",
+                            "منسوب Z (ملم)",
+                            "الاتجاه",
+                            "التركيبة الحاكمة",
+                            "|قص القاعدة|",
+                            "P عند Bottom",
+                            "|V| عند Bottom",
+                            "أقصى |Drift| مرن",
+                            "θ",
+                            "θmax",
+                            "قرار الكود",
+                            "سبب عدم الحساب",
+                        ]
+                    ].round(6),
+                    width="stretch",
+                )
+                for row in governing.itertuples(index=False):
+                    if pd.notna(row.theta):
+                        report_findings.append(
+                            f"P-Delta — {row.story}، الاتجاه {row.direction}، "
+                            f"التركيبة الحاكمة {row.output_case}: θ = {row.theta:.5f} "
+                            f"مقابل θmax = {row.theta_max:.5f} "
+                            f"({row.classification})."
+                        )
+                with st.expander("تفاصيل جميع التركيبات المختارة"):
+                    st.dataframe(pdelta["results"], width="stretch")
+            if pdelta["required_inputs"]:
+                st.write("متطلبات/تنبيهات الفحص:")
+                for item in pdelta["required_inputs"]:
+                    st.markdown(f"- {item}")
+            st.markdown("---")
+        with st.container(key="audit_section_additional_tables"):
+            st.header("8. جداول ETABS الإضافية")
+            with st.expander("نطاق عرض الجداول الإضافية", expanded=True):
+                st.markdown(
+                    "تُعرض البيانات الاختيارية كما وردت في الملف، دون معادلات "
+                    "مشتقة أو حدود قبول أو تصنيف تلقائي. غياب جدول لا يُحوّل "
+                    "أي قيمة إلى صفر ولا يعني اجتياز فحص."
+                )
+            st.caption(
+                "تعرض هذه الجداول كما وردت في المصنف الأساسي أو الملف المنفصل. وجودها يتيح مراجعة بيانات إضافية، "
+                "ولا ينشئ فحص نجاح/فشل تلقائياً."
+            )
+            for key, label, _aliases in OPTIONAL_SHEET_NAMES:
+                if key in tables:
+                    with st.expander(f"{label} — متوفر"):
+                        st.dataframe(tables[key], width="stretch")
+                else:
+                    issue = optional_table_issues.get(key)
+                    if issue:
+                        st.warning(f"تعذر استخدام الجدول الاختياري `{label}`: {issue}")
+                        report_findings.append(f"الجدول الاختياري {label}: تعذر قراءته.")
+                    else:
+                        st.info(f"لم يوجد جدول `{label}` في المصنف الأساسي ولم يُرفع ملف بديل.")
+                        report_findings.append(f"الجدول الاختياري {label}: لم يُرفع.")
+
+        render_sidebar_status(status_dict)
+
+        st.sidebar.markdown("---")
+        st.sidebar.header("📄 تصدير التقرير")
+        project = {
+            "name": project_name,
+            "location": project_location,
+            "consultant": consultant_name,
+            "contact": contact_info,
+            "usage": building_usage,
+            "stories": num_stories,
+            "height": total_height,
+            "fc_vertical": fc_vertical,
+            "fc_horizontal": fc_horizontal,
+            "rebar": rebar_grade,
+            "sdl": sdl_range,
+            "ll": ll_range,
+            "system": selected_system,
+            "zone": zone_z,
+            "soil": soil_factor_s,
+            "r": response_mod_r,
+            "cd": deflection_cd,
+            "ie": importance_factor,
+            "risk_category": risk_category,
+            "seismic_design_category": seismic_design_category,
+            "drift_applicability_confirmed": drift_applicability_confirmed,
+            "accidental_eccentricity_percent": accidental_eccentricity_percent,
+            "accidental_torsion_confirmed": accidental_torsion_confirmed,
+            "ax_applicability_confirmed": ax_applicability_confirmed,
+            "tx": tx_val,
+            "ty": ty_val,
+            "dx": dx_val,
+            "dy": dy_val,
+            "target": asce_percentage,
+        }
+        report = generate_word_report(project, status_dict, pdelta, report_findings)
+        st.sidebar.download_button(
+            "📥 تحميل ملخص تدقيق ETABS (Word)",
+            data=report,
+            file_name=f"{project_name}_ETABS_Audit_Report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
