@@ -2,6 +2,7 @@ import io
 import hashlib
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import BinaryIO, MutableMapping
 
 import numpy as np
@@ -66,6 +67,7 @@ OPTIONAL_SHEET_NAMES = tuple(
 MAX_CACHED_WORKBOOK_VERSIONS = 4
 CACHE_SESSION_KEY = "_etabs_workbook_versions"
 OPTIONAL_TABLE_CACHE_SESSION_KEY = "_etabs_optional_table_versions"
+DEFAULT_RESULTS_PATH = Path(r"E:\etabs_tables\003\results.xlsx")
 
 COLUMNS = {
     "centers": {
@@ -186,11 +188,23 @@ def missing_optional_sheets(
     ]
 
 
-def validate_upload_filename(filename: str) -> None:
-    if filename.strip().casefold() != "results.xlsx":
+def read_local_workbook_bytes(path: str | Path) -> bytes:
+    workbook_path = Path(path).expanduser()
+    if workbook_path.name.strip().casefold() != "results.xlsx":
         raise WorkbookValidationError(
-            "يجب أن يكون اسم الملف المرفوع results.xlsx بالضبط."
+            "يجب أن يكون اسم المصنف المحلي results.xlsx بالضبط."
         )
+    if not workbook_path.is_file():
+        raise WorkbookValidationError(
+            f"لم يُعثر على ملف النتائج المحلي: {workbook_path}. "
+            "ضع تصدير ETABS الخام بهذا الاسم في المسار المحدد."
+        )
+    try:
+        return workbook_path.read_bytes()
+    except OSError as exc:
+        raise WorkbookValidationError(
+            f"تعذر قراءة ملف النتائج المحلي {workbook_path}: {exc}"
+        ) from exc
 
 
 def get_cached_workbook(

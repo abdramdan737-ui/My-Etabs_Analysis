@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+import tempfile
 
 from streamlit.testing.v1 import AppTest
 
@@ -7,32 +8,37 @@ from app.test_etabs_processing import build_workbook
 
 
 class StreamlitAppNavigationTests(unittest.TestCase):
-    def test_local_app_starts_without_auth_and_exposes_section_navigation(self):
+    def test_missing_local_file_is_reported_without_hiding_sidebar_controls(self):
         app = AppTest.from_file(str(Path(__file__).with_name("etabs_tables.py")))
 
         app.run()
 
         self.assertEqual(len(app.exception), 0)
         self.assertIn("selected_audit_section", app.session_state)
-        self.assertEqual(len(app.get("file_uploader")), 6)
+        self.assertIn("primary_results_path", app.session_state)
+        self.assertEqual(len(app.get("file_uploader")), 5)
+        self.assertGreater(len(app.error), 0)
 
     def test_selecting_audit_section_hides_other_section_containers(self):
         app = AppTest.from_file(str(Path(__file__).with_name("etabs_tables.py"))).run()
-        app.get("file_uploader")[0].upload(
-            "results.xlsx",
-            build_workbook(),
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        app.radio[0].set_value("pdelta").run()
+        with tempfile.TemporaryDirectory() as directory:
+            local_file = Path(directory) / "results.xlsx"
+            local_file.write_bytes(build_workbook())
+            path_input = next(
+                item for item in app.text_input
+                if item.key == "primary_results_path"
+            )
+            path_input.set_value(str(local_file))
+            app.radio[0].set_value("pdelta").run()
 
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(app.radio[0].value, "pdelta")
-        rendered_styles = "\n".join(element.value for element in app.markdown)
-        self.assertIn(".st-key-audit_section_centers", rendered_styles)
-        self.assertNotIn(".st-key-audit_section_pdelta", rendered_styles)
-        workbook_versions = app.session_state["_etabs_workbook_versions"]
-        parsed_workbook = next(iter(workbook_versions.values()))
-        self.assertIn("story_forces", parsed_workbook.tables)
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(app.radio[0].value, "pdelta")
+            rendered_styles = "\n".join(element.value for element in app.markdown)
+            self.assertIn(".st-key-audit_section_centers", rendered_styles)
+            self.assertNotIn(".st-key-audit_section_pdelta", rendered_styles)
+            workbook_versions = app.session_state["_etabs_workbook_versions"]
+            parsed_workbook = next(iter(workbook_versions.values()))
+            self.assertIn("story_forces", parsed_workbook.tables)
 
 
 if __name__ == "__main__":
