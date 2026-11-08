@@ -1,5 +1,7 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -14,6 +16,7 @@ from app.etabs_processing import (
     calculate_iraqi_2019_torsional_irregularity,
     calculate_story_drifts,
     calculate_pdelta_screening,
+    read_local_workbook_bytes,
     get_cached_optional_table,
     get_cached_workbook,
     load_optional_etabs_table,
@@ -23,7 +26,6 @@ from app.etabs_processing import (
     missing_required_sheets,
     pdelta_combination_options,
     pdelta_assessment,
-    validate_upload_filename,
 )
 
 
@@ -248,11 +250,26 @@ class EtabsProcessingTests(unittest.TestCase):
         self.assertIn("Joint Displacements", labels)
         self.assertIn("Diaphragm Max Over Avg Drifts", labels)
 
-    def test_upload_must_use_results_xlsx_filename(self):
-        validate_upload_filename("results.xlsx")
-        validate_upload_filename("RESULTS.XLSX")
-        with self.assertRaises(WorkbookValidationError):
-            validate_upload_filename("etabs_export.xlsx")
+    def test_local_workbook_reader_reads_results_xlsx(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.xlsx"
+            content = build_workbook()
+            path.write_bytes(content)
+
+            self.assertEqual(read_local_workbook_bytes(path), content)
+
+    def test_local_workbook_reader_reports_missing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.xlsx"
+            with self.assertRaisesRegex(WorkbookValidationError, "لم يُعثر"):
+                read_local_workbook_bytes(path)
+
+    def test_local_workbook_reader_requires_expected_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "etabs_export.xlsx"
+            path.write_bytes(build_workbook())
+            with self.assertRaisesRegex(WorkbookValidationError, "results.xlsx"):
+                read_local_workbook_bytes(path)
 
     def test_session_cache_restores_previous_values_after_file_change(self):
         state = {}
