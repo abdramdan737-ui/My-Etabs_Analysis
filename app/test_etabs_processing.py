@@ -152,7 +152,7 @@ class EtabsProcessingTests(unittest.TestCase):
         self.assertNotIn("story_forces", workbook.tables)
         self.assertNotIn("diaphragm_drifts", workbook.tables)
 
-    def test_core_workbook_parses_only_required_sheets(self):
+    def test_workbook_parses_required_and_present_optional_sheets(self):
         self.assertEqual(
             set(self.workbook.tables),
             {
@@ -162,10 +162,15 @@ class EtabsProcessingTests(unittest.TestCase):
                 "modal_mass",
                 "story_stiffness",
                 "displacements",
+                "story_forces",
+                "diaphragm_displacements",
+                "story_mass",
+                "joint_displacements",
+                "diaphragm_drifts",
             },
         )
 
-    def test_core_workbook_ignores_malformed_optional_sheets(self):
+    def test_malformed_optional_sheets_do_not_block_core_workbook(self):
         workbook = load_workbook(io.BytesIO(build_workbook()))
         del workbook["Story Forces"]
         malformed = workbook.create_sheet("Story Forces")
@@ -180,6 +185,12 @@ class EtabsProcessingTests(unittest.TestCase):
 
         self.assertIn("base_reactions", parsed.tables)
         self.assertNotIn("story_forces", parsed.tables)
+        self.assertIn("الأعمدة المطلوبة غير موجودة", parsed.optional_issues["story_forces"])
+
+    def test_embedded_story_forces_are_available_for_pdelta(self):
+        workbook = load_etabs_workbook(build_workbook())
+
+        self.assertEqual(workbook.tables["story_forces"].loc[0, "p"], 100)
 
     def test_optional_workbooks_can_contain_only_the_requested_table(self):
         expected_tables = {

@@ -1,7 +1,7 @@
 import io
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import BinaryIO, MutableMapping
 
 import numpy as np
@@ -15,6 +15,7 @@ class WorkbookValidationError(ValueError):
 @dataclass
 class EtabsWorkbook:
     tables: dict[str, pd.DataFrame]
+    optional_issues: dict[str, str] = field(default_factory=dict)
 
 
 REQUIRED_SHEETS = {
@@ -344,7 +345,27 @@ def load_etabs_workbook(source: bytes | bytearray | BinaryIO) -> EtabsWorkbook:
                 f"تعذر قراءة ورقة {sheet_name}: {exc}"
             ) from exc
 
-    return EtabsWorkbook(tables=tables)
+    optional_issues = {}
+    for key, optional_table in OPTIONAL_TABLES.items():
+        sheet_name = _find_sheet(sheet_names, optional_table["aliases"])
+        if sheet_name is None:
+            continue
+        try:
+            raw_frame = pd.read_excel(
+                excel, sheet_name=sheet_name, skiprows=[0, 2], header=0
+            )
+            tables[key] = _canonicalize_table(
+                raw_frame,
+                sheet_name,
+                COLUMNS.get(key, {}),
+                OPTIONAL_COLUMNS.get(key, {}),
+            )
+        except WorkbookValidationError as exc:
+            optional_issues[key] = str(exc)
+        except Exception as exc:
+            optional_issues[key] = f"تعذر قراءة ورقة {sheet_name}: {exc}"
+
+    return EtabsWorkbook(tables=tables, optional_issues=optional_issues)
 
 
 def load_optional_etabs_table(
