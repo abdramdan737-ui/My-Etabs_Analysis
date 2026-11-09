@@ -1,8 +1,0 @@
-**/results.xlsx
-**/result_tables.xlsx
-*.xlsx
-*.xls
-*.xlsm
-__pycache__/
-*.py[cod]
-.streamlit/secrets.toml
