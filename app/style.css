@@ -1,14 +1,47 @@
-/* تنسيق جدول HTML العادي والخلفية الداكنة للجداول */
+/* ==========================================================================
+   ملف الستايل الكامل لتطبيق تدقيق ETABS
+   ==========================================================================
+   كل الألوان والأحجام مُجمَّعة هنا في متغيرات CSS أعلى كل قسم، بحيث يمكن
+   تغيير شكل التطبيق بالكامل بتعديل بضع قيم فقط دون البحث داخل كود Python.
+
+   الأقسام:
+     1) متغيرات الألوان والأحجام العامة (الشاشة الرئيسية)
+     2) جداول HTML احتياطية (st.table) — لا تؤثر على st.dataframe
+     3) العنوان الرئيسي وعناوين الأقسام (الشاشة الرئيسية)
+     4) الشريط الجانبي: الخلفية ولون النصوص
+     5) الشريط الجانبي: الأحجام والمسافات (تقليص الارتفاعات)
+     6) قائمة التنقل بين الأقسام (داخل الشريط الجانبي)
+   ========================================================================== */
+
+
+/* -------------------- 1) متغيرات عامة للشاشة الرئيسية -------------------- */
+:root {
+    --main-bg-dark: #0f1724;
+    --panel-bg-dark: #1b2330;
+    --accent-gold: #f2d675;
+    --accent-blue: #7fb3ff;
+    --text-light: #e8ecf1;
+    --text-white: #ffffff;
+
+    --title-font-size: 34px;
+    --section-font-size: 24px;
+    --subsection-font-size: 19px;
+}
+
+
+/* ---------- 2) جداول HTML احتياطية (لا تؤثر على st.dataframe) ---------- */
+/* جداول ETABS الفعلية تُعرض عبر st.dataframe وتتبع ثيم .streamlit/config.toml
+   تلقائياً، وليس هذه القاعدة. هذه القاعدة احتياطية فقط لأي st.table مستقبلي. */
 .dataframe {
     font-family: 'Tahoma', sans-serif !important;
     font-size: 15px !important;
     text-align: center !important;
-    background-color: #1b2330 !important;
-    color: #e8ecf1 !important;
+    background-color: var(--panel-bg-dark) !important;
+    color: var(--text-light) !important;
 }
 th {
-    background-color: #E0FFFF !important;
-    color: #000000!important;
+    background-color: #2a3650 !important;
+    color: var(--accent-gold) !important;
     font-weight: bold !important;
     text-align: center !important;
     padding: 10px !important;
@@ -19,39 +52,43 @@ td {
     border-color: #3a4560 !important;
 }
 
-/* تنسيق العناوين الرئيسية وعناوين الأقسام في الواجهة الرئيسية */
+
+/* -------- 3) العنوان الرئيسي وعناوين الأقسام (الشاشة الرئيسية) -------- */
+/* الشريط الجانبي له تخصيص منفصل في القسمين 4 و5 أدناه يتجاوز هذا عمداً،
+   للحفاظ على مظهره الفاتح رغم تفعيل الثيم الداكن للتطبيق عموماً. */
 h1, h2, h3 {
     font-family: 'Tahoma', sans-serif !important;
     font-weight: bold !important;
 }
 div[data-testid="stAppViewContainer"] h1 {
-    font-size: 34px !important;
+    font-size: var(--title-font-size) !important;
     text-align: center !important;
-    color: #f2d675 !important;
-    background: linear-gradient(90deg, #0f1724, #1b2a44 55%, #0f1724) !important;
+    color: var(--accent-gold) !important;
+    background: linear-gradient(90deg, var(--main-bg-dark), #1b2a44 55%, var(--main-bg-dark)) !important;
     padding: 18px 20px !important;
     border-radius: 12px !important;
     margin: 0 0 18px 0 !important;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.35) !important;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35) !important;
 }
 div[data-testid="stAppViewContainer"] h2 {
-    font-size: 24px !important;
-    color: #ffffff !important;
+    font-size: var(--section-font-size) !important;
+    color: var(--text-white) !important;
     background-color: #1b2a44 !important;
     padding: 10px 18px !important;
     border-radius: 8px !important;
-    border-right: 6px solid #f2d675 !important;
+    border-right: 6px solid var(--accent-gold) !important;
     margin: 22px 0 14px 0 !important;
 }
 div[data-testid="stAppViewContainer"] h3 {
-    font-size: 19px !important;
-    color: #7fb3ff !important;
+    font-size: var(--subsection-font-size) !important;
+    color: var(--accent-blue) !important;
     border-bottom: 2px solid #2a3650 !important;
     padding-bottom: 6px !important;
     margin: 16px 0 10px 0 !important;
 }
 
-/* تثبيت الشريط الجانبي على المظهر الفاتح مع ألوان النصوص */
+
+/* ---------------- 4) الشريط الجانبي: الخلفية ولون النصوص ---------------- */
 section[data-testid="stSidebar"] {
     background-color: #ffffff !important;
 }
@@ -66,7 +103,10 @@ section[data-testid="stSidebar"] span {
     color: #1f1f1f !important;
 }
 
-/* متغيرات وقواعد تقليص وضبط عناصر الشريط الجانبي والحقول */
+
+/* ---------- 5) الشريط الجانبي: الأحجام والمسافات (تقليص الطول) ---------- */
+/* لتكبير/تصغير كل نصوص أو حقول الشريط الجانبي دفعة واحدة، غيّر المتغيرات
+   الثلاثة هنا فقط بدل البحث عن كل قاعدة على حدة. */
 section[data-testid="stSidebar"] {
     --sb-heading-size: 14px;
     --sb-text-size: 12.5px;
@@ -96,6 +136,7 @@ section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
     line-height: 1.1 !important;
     margin-bottom: 0.05rem !important;
 }
+/* تقليص حقول الإدخال نفسها (قوائم منسدلة، نصوص، أرقام) إلى ارتفاع موحّد */
 section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
     min-height: var(--sb-field-height) !important;
     font-size: var(--sb-text-size) !important;
@@ -108,6 +149,8 @@ section[data-testid="stSidebar"] input {
     padding-bottom: 0.15rem !important;
     height: var(--sb-field-height) !important;
 }
+/* حاويات الحقول نفسها (data-testid أكثر ثباتاً بين إصدارات Streamlit من
+   أسماء الكلاسات) — تقليص الهامش الرأسي حول كل حقل */
 section[data-testid="stSidebar"] [data-testid="stSelectbox"],
 section[data-testid="stSidebar"] [data-testid="stTextInput"],
 section[data-testid="stSidebar"] [data-testid="stNumberInput"],
@@ -119,6 +162,7 @@ section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] {
     margin-bottom: 0.05rem !important;
     min-height: 0 !important;
 }
+/* تقليص ارتفاع منطقة المنزلقات (Slider) ومسافتها عن الحقل التالي */
 section[data-testid="stSidebar"] [data-testid="stSlider"] {
     padding-bottom: 0.3rem !important;
 }
@@ -126,7 +170,8 @@ section[data-testid="stSidebar"] [data-baseweb="slider"] {
     margin-top: 0.1rem !important;
 }
 
-/* تنسيق قائمة التنقل بين الأقسام (Radio Buttons) في الشريط الجانبي */
+
+/* -------- 6) قائمة التنقل بين الأقسام (داخل الشريط الجانبي) -------- */
 section[data-testid="stSidebar"] .stRadio > div {
     gap: 0.1rem !important;
 }
