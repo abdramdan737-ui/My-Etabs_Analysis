@@ -1,1 +1,6 @@
-GEMINI_API_KEY = "AQ.Ab8RN6KECzYPd8C17dA2mYhXHXqYRUf3qua7qPlWx4Lltr0nw"
+[theme]
+base="dark"
+primaryColor="#f2d675"
+backgroundColor="#0f1724"
+secondaryBackgroundColor="#1b2330"
+textColor="#e8ecf1"
