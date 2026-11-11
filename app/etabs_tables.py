@@ -14,12 +14,28 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 # إعدادات واجهة التطبيق
 # ==========================================
 st.set_page_config(
-    page_title="منصة تدقيق نتائج الايتابس وتوليد النوتة الحسابية", layout="wide"
+    page_title="منصة تدقيق نتائج ETABS وتوليد النوتة الحسابية", layout="wide"
 )
 
+def _load_css():
+    """يقرأ ملف style.css من نفس مجلد هذا السكربت ويُدرجه في الصفحة.
+    محمي بـ try/except عمداً: إن غاب الملف أو تعذّرت قراءته لأي سبب (مسار
+    خاطئ، نسيان رفعه)، يستمر التطبيق بالعمل بالمظهر الافتراضي بدل التعطّل
+    الكامل، مع تنبيه واضح في الصفحة نفسه بدل فشل صامت."""
+    try:
+        css_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.css")
+        with open(css_path, "r", encoding="utf-8") as f:
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    except Exception as exc:
+        st.warning(
+            f"⚠️ تعذّر تحميل ملف التنسيق style.css ({exc}). سيعمل التطبيق "
+            "بالمظهر الافتراضي. تأكد من وجود style.css في نفس مجلد هذا الملف."
+        )
 
 
-st.title("🏗️ تدقيق التحليل الإنشائي لبرنامج الايتابس وتوليد النوتة الحسابية ")
+_load_css()
+
+st.title("🏗️ تدقيق التحليل الإنشائي لبرنامج الايتابس وتوليد النوتة الحسابية الهندسية")
 st.write(
     "منصة هندسية متكاملة لتدقيق مخرجات الايتابس وفق مدونة الزلازل العراقية والكود الامريكي "
     "مع إدخال بيانات المشروع وتصدير تقرير هندسي احترافي ورسوم تفاعلية."
@@ -449,8 +465,12 @@ building_usage = st.sidebar.selectbox("طبيعة الاستخدام (Use Type)"
     "مبنى إداري", "مبنى سكني", "مبنى تجاري", "منشأ تعليمي / خدمي", "منشأ صناعي / مستودع"
 ])
 
-num_stories = st.sidebar.number_input("عدد الطوابق", value=4, step=1)
-total_height = st.sidebar.number_input("الارتفاع الإجمالي للمبنى (م)", value=7.0, step=0.5)
+ground_floor_height = st.sidebar.number_input("ارتفاع الطابق الأرضي (م)", value=4.5, step=0.5, min_value=0.0)
+typical_floor_height = st.sidebar.number_input("ارتفاع الطابق المتكرر (م)", value=3.5, step=0.5, min_value=0.0)
+num_typical_floors = st.sidebar.number_input("عدد الطوابق المتكررة", value=3, step=1, min_value=0)
+total_height = ground_floor_height + num_typical_floors * typical_floor_height
+num_stories = num_typical_floors + 1
+st.sidebar.caption(f"الارتفاع الإجمالي المحسوب: {total_height:.2f} م | عدد الطوابق الكلي: {num_stories}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🧱 خواص المواد الإنشائية")
