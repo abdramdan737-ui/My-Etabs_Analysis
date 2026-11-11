@@ -4,3 +4,5 @@ pandas
 python-docx
 openpyxl
 xlrd
+plotly 
+xlsxwriter
