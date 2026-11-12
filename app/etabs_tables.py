@@ -134,7 +134,7 @@ if not st.session_state['logged_in']:
     with st.sidebar.form("login_form"):
         st.markdown("أدخل بياناتك للبدء (تحصل على **مرتين مجاناً**):")
         input_name = st.text_input("الاسم الكامل")
-        input_phone = st.text_input("رقم هاتف واتساب (مع الرمز الدولي، مثال: 96477xxxxxxxxx)")
+        input_phone = st.text_input("رقم هاتف واتسااب")
         submit_login = st.form_submit_button("دخول للمنصة")
         
         if submit_login:
