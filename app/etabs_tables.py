@@ -111,7 +111,7 @@ if st.session_state['is_admin']:
                 cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
                 conn.commit()
                 conn.close()
-                st.sidebar.success(fاخر تحديث: تم تفعيل اشتراك الرقم {target_phone} بنجاح! 🎉")
+             st.sidebar.success(f"تم تفعيل اشتراك الرقم {target_phone} بنجاح!")
             except Exception as e:
                 st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
         else:
