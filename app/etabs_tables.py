@@ -10,6 +10,105 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 # ==========================================
+import sqlite3
+import os
+import streamlit as st
+
+# ==========================================
+# 🔐 نظام إدارة المستخدمين والاشتراكات (SQLite)
+# ==========================================
+def init_db():
+    conn = sqlite3.connect("users_subscriptions.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            phone TEXT PRIMARY KEY,
+            full_name TEXT,
+            usage_count INTEGER DEFAULT 0,
+            is_subscribed INTEGER DEFAULT 0,
+            expiry_date TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def check_user_access(phone, full_name):
+    conn = sqlite3.connect("users_subscriptions.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT usage_count, is_subscribed FROM users WHERE phone = ?", (phone,))
+    row = cursor.fetchone()
+    
+    if row is None:
+        # مستخدم جديد: يمنح 2 محاولات مجانية
+        cursor.execute("INSERT INTO users (phone, full_name, usage_count, is_subscribed) VALUES (?, ?, 1, 0)", (phone, full_name))
+        conn.commit()
+        conn.close()
+        return True, "مرحباً بك! هذه هي تجربتك المجانية الأولى (يتبقى لديك محاولة واحدة)."
+    
+    usage_count, is_subscribed = row
+    
+    if is_subscribed == 1:
+        conn.close()
+        return True, "أهلاً بك! اشتراكك مفعل وصالح."
+    
+    if usage_count < 2:
+        # زيادة عداد الاستخدام المجاني
+        new_count = usage_count + 1
+        cursor.execute("UPDATE users SET usage_count = ? WHERE phone = ?", (new_count, phone))
+        conn.commit()
+        conn.close()
+        remaining = 2 - new_count
+        return True, f"مرحباً بك! لقد استخدمت محاولة مجانية، ويتبقى لديك {remaining} محاولة."
+    
+    conn.close()
+    return False, "لقد استنفذت مرات الدخول المجانية (مرتان). يلزم الاشتراك لتمرير مشاريعك."
+
+# ==========================================
+# شاشة تسجيل الدخول في الشريط الجانبي (Sidebar Login)
+# ==========================================
+st.sidebar.header("🔑 تسجيل الدخول للمنصة")
+
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+    st.session_state['user_phone'] = ""
+
+if not st.session_state['logged_in']:
+    with st.sidebar.form("login_form"):
+        st.markdown("أدخل بياناتك للبدء (تحصل على **مرتين مجاناً**):")
+        input_name = st.text_input("الاسم الكامل")
+        input_phone = st.text_input("رقم هاتف واتساب (مع الرمز الدولي، مثال: 96477xxxxxxxxx)")
+        submit_login = st.form_submit_button("دخول للمنصة")
+        
+        if submit_login:
+            if input_name and input_phone:
+                allowed, msg = check_user_access(input_phone, input_name)
+                if allowed:
+                    st.session_state['logged_in'] = True
+                    st.session_state['user_phone'] = input_phone
+                    st.sidebar.success(msg)
+                    st.rerun()
+                else:
+                    st.sidebar.error(msg)
+            else:
+                st.sidebar.warning("⚠️ يرجى إدخال الاسم ورقم الواتساب بشكل صحيح.")
+
+# إذا لم يتم تسجيل الدخول، يتم إيقاف عرض باقي المنصة وعرض تفاصيل الدفع (Qi Card) عند النفاد
+if not st.session_state['logged_in']:
+    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من القائمة الجانبية (Sidebar) للوصول إلى أدوات التدقيق الإنشائي والنوتة الحسابية.")
+    
+    with st.expander("💳 تفاصيل الاشتراكات وطريقة الدفع (عبر Qi Card)", expanded=True):
+        st.markdown("""
+        بعد انتهاء المرتين المجانيتين، يمكنك الاشتراك لإتاحة المنصة بلا حدود:
+        * **خطط الاشتراكات المتاحة:** (شهرية 📅 / ربع سنوية 📊 / سنوية 🏆)
+        * **طريقة الدفع (سوبر كي - Qi Card بالدولار):**
+          * تحويل المبلغ المطلوب إلى رقم الحساب الشخصي (Qi Card): `4269127660`
+          * أخذ صورة لـ (إيصال التحويل / السكرين شوت).
+          * إرسال الإيصال مع رقم هاتفك عبر واتساب للإدارة لتفعيل الحساب فوراً: 
+            [📱 تواصل عبر واتساب للتفعيل](https://wa.me/9647740884754)
+        """)
+    st.stop()
 # إدارة الملفات المرفوعة بأمان في الذاكرة المؤقتة (Session State)
 # ==========================================
 st.sidebar.header("📁 إدارة ملفات البيانات (ETABS Results)")
@@ -57,11 +156,11 @@ local_default_path = os.path.join(os.getcwd(), "result_tables.xlsx")
 if not active_sheets and not os.path.exists(local_default_path):
     st.error("🚨 **تنبيه هام جداً:** لا يمكن المتابعة أو الحصول على أي نتائج هندسية لعدم توفر بيانات الإدخال!")
     
-    with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق  الضرورية", expanded=True):
+    with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق (Sheets) الضرورية", expanded=True):
         st.markdown("""
-        لضمان عمل المنصة واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي
+        لضمان عمل المنصة واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي:
         
-        1. **طريقة الرفع** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف المسمى باسم **`results.xlsx`**.
+        1. **طريقة الرفع:** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف المسمى باسم **`results.xlsx`**.
         2. **أسماء الأوراق الضرورية في ملف الإكسيل:**
            يجب أن يحتوي ملف الإكسيل على الأوراق التالية مطابقة لتنفيذ المعالجات والتدقيق لضمان التدقيق الأولي:
            * ورقة **`Story Stiffness`**: تدقيق صلابة الطوابق الجانبية.
@@ -114,10 +213,10 @@ if not os.path.exists(target_file_path):
     
     with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق  الضرورية", expanded=True):
         st.markdown(
-            "لضمان عمل التطبيق واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي\n\n"
+            "لضمان عمل التطبيق واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي:\n\n"
             "1. **طريقة الرفع:** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف وتسميته باسم **`results.xlsx`**.\n"
             "2. **أسماء الأوراق الضرورية في ملف الإكسيل:**\n"
-            "يجب أن يحتوي ملف الإكسيل على الأوراق التالية على الاقل لضمان التدقيق الأولي:\n"
+            "يجب أن يحتوي ملف الإكسيل على الأوراق التالية على الاقل لضمان التدقيق الأولي\n"
             "* ورقة **`Story Stiffness`**: تدقيق صلابة الطوابق الجانبية.\n"
             "* ورقة **`Story Max Over Avg Disp`**: تدقيق نسبة الانجرافات القصوى إلى المتوسطة لكل طابق.\n"
             "* ورقة **`Modal Participating Mass Ratios`**: تدقيق نسبة مشاركة الكتلة لكل نمط.\n"
