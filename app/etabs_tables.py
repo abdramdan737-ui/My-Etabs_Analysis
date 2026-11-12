@@ -11,14 +11,95 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 # ==========================================
 import sqlite3
-import os
-import streamlit as st
-
 
 # ==========================================
 # 🔐 نظام إدارة الدخول والصلاحيات والاشتراكات
 # ==========================================
+import hmac
+from datetime import date, datetime, timedelta
 
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users_subscriptions.db")
+FREE_USES = 2
+
+def _db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with _db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                phone            TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                free_uses_left   INTEGER NOT NULL DEFAULT 2,
+                subscription_end TEXT,              -- YYYY-MM-DD
+                is_blocked       INTEGER NOT NULL DEFAULT 0,
+                created_at       TEXT NOT NULL
+            )
+        """)
+
+def normalize_phone(raw: str) -> str:
+    """أرقام عربية-هندية -> لاتينية، حذف الرموز، توحيد 964 إلى 0."""
+    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    digits = "".join(ch for ch in raw.translate(trans) if ch.isdigit())
+    if digits.startswith("964"):
+        digits = "0" + digits[3:]
+    elif digits and not digits.startswith("0"):
+        digits = "0" + digits
+    return digits
+
+def check_user_access(phone: str, name: str):
+    """Returns (allowed: bool, msg: str). لا تستهلك تجربة، فقط تتحقق."""
+    phone = normalize_phone(phone)
+    if len(phone) < 10:
+        return False, "رقم الهاتف غير صالح"
+    try:
+        with _db() as conn:
+            row = conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO users (phone, name, free_uses_left, created_at) VALUES (?,?,?,?)",
+                    (phone, name.strip(), FREE_USES, datetime.now().isoformat(timespec="seconds")),
+                )
+                return True, f"أهلاً {name.strip()}، لديك {FREE_USES} استخدامات مجانية"
+    except sqlite3.Error as e:
+        return False, f"خطأ في قاعدة البيانات: {e}"
+
+    if row["is_blocked"]:
+        return False, "الحساب موقوف، تواصل مع المشرف"
+    end = row["subscription_end"]
+    if end and date.fromisoformat(end) >= date.today():
+        return True, f"أهلاً {row['name']}، اشتراكك ساري حتى {end}"
+    if row["free_uses_left"] > 0:
+        return True, f"أهلاً {row['name']}، المتبقي {row['free_uses_left']} استخدام مجاني"
+    return False, "انتهت التجربة المجانية، يلزم تفعيل اشتراك"
+
+def consume_free_use(phone: str) -> bool:
+    """استدعِها عند تنفيذ العملية الفعلية (توليد تقرير/تصدير). تتجاوز المشترك."""
+    with _db() as conn:
+        row = conn.execute("SELECT free_uses_left, subscription_end FROM users WHERE phone=?", (phone,)).fetchone()
+        if not row:
+            return False
+        if row["subscription_end"] and date.fromisoformat(row["subscription_end"]) >= date.today():
+            return True
+        cur = conn.execute(
+            "UPDATE users SET free_uses_left = free_uses_left - 1 WHERE phone=? AND free_uses_left > 0",
+            (phone,),
+        )
+        return cur.rowcount == 1
+
+def grant_subscription(phone: str, days: int = 30):
+    """للمشرف: تمديد من تاريخ الانتهاء الحالي إن كان ساريًا، وإلا من اليوم."""
+    with _db() as conn:
+        row = conn.execute("SELECT subscription_end FROM users WHERE phone=?", (phone,)).fetchone()
+        base = date.today()
+        if row and row["subscription_end"]:
+            base = max(base, date.fromisoformat(row["subscription_end"]))
+        conn.execute("UPDATE users SET subscription_end=? WHERE phone=?",
+                     ((base + timedelta(days=days)).isoformat(), phone))
+
+init_db()
 DB_PATH = "users_subscriptions.db"
 
 # ==========================================
