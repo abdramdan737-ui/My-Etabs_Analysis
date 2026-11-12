@@ -76,7 +76,10 @@ st.sidebar.subheader("👑 لوحة تحكم المشرف")
 if 'is_admin' not in st.session_state:
     st.session_state['is_admin'] = False
 
-if not st.session_state['is_admin']:
+# السماح للمشرف بالدخول الشامل وتخطي شاشة تسجيل الدخول العادية
+if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', False):
+    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول أو إدخال بياناتك للبدء.")
+    st.stop()
     with st.sidebar.form("admin_login_form"):
         admin_pass = st.text_input("كلمة سر المشرف", type="password")
         submit_admin = st.form_submit_button("دخول المشرف")
