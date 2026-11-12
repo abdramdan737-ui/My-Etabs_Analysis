@@ -82,7 +82,7 @@ if not st.session_state['is_admin']:
         submit_admin = st.form_submit_button("دخول المشرف")
         
         if submit_admin:
-            if admin_pass == "Admin12345":  # يمكنك تغيير كلمة السر هنا حسب رغبتك
+            if admin_pass == "abosadeer_1987":  # يمكنك تغيير كلمة السر هنا حسب رغبتك
                 st.session_state['is_admin'] = True
                 st.success("تم تسجيل دخول المشرف بنجاح!")
                 st.rerun()
