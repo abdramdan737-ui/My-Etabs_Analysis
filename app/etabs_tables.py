@@ -137,7 +137,7 @@ if not st.session_state['logged_in']:
         input_name = st.text_input("الاسم الكامل")
         input_phone = st.text_input("رقم هاتف واتسااب")
         submit_login = st.form_submit_button("دخول للمنصة")
-if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', true):
+if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', False):
        st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من الشريط الجانبي للوصول إلى أدوات التدقيق الهندسية.")
        st.stop()
 if submit_login:
