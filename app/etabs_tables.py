@@ -67,56 +67,53 @@ def check_user_access(phone, full_name):
 
 # ==========================================
 # ==========================================
+# 👑 نظام دخول وخروج المشرف (Admin Panel)
 # ==========================================
-# 👑 زر وبوابة دخول المشرف المباشرة
-# ==========================================
-st.sidebar.markdown("---")
-st.sidebar.subheader("👑 لوحة تحكم المشرف")
-
 if 'is_admin' not in st.session_state:
     st.session_state['is_admin'] = False
 
-# السماح للمشرف بالدخول الشامل وتخطي شاشة تسجيل الدخول العادية
-if not st.session_state['is_admin']:
-    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول أو إدخال بياناتك للبدء.")
-    st.stop()
-    with st.sidebar.form("admin_login_form"):
+st.sidebar.markdown("---")
+
+# زر أو قسم خاص بالمشرف في أسفل الشريط الجانبي
+with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
+    if not st.session_state['is_admin']:
         admin_pass = st.text_input("كلمة سر المشرف", type="password")
-        submit_admin = st.form_submit_button("دخول المشرف")
-        
-        if submit_admin:
-            if admin_pass == "abosadeer_1987":  # يمكنك تغيير كلمة السر هنا حسب رغبتك
+        if st.button("دخول كـ مشرف"):
+            # كلمة السر الخاصة بك (يمكنك تغييرها كما تشاء)
+            if admin_pass == "abosadeer_1987": 
                 st.session_state['is_admin'] = True
                 st.success("تم تسجيل دخول المشرف بنجاح!")
                 st.rerun()
             else:
                 st.error("كلمة السر غير صحيحة.")
-else:
-    st.sidebar.success("✅ مسجل دخول بصفتك مشرف النظام")
-    
-    # حقل تفعيل الاشتراكات للمشتركين
-    target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
-    
-    if st.sidebar.button("تفعيل اشتراك المستخدم"):
-        if target_phone:
-            try:
-                conn = sqlite3.connect("users_subscriptions.db")
-                cursor = conn.cursor()
-                cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
-                conn.commit()
-                conn.close()
-                st.sidebar.success(f"تم تفعيل اشتراك الرقم {target_phone} بنجاح!")
-            except Exception as e:
-                st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
-        else:
-            st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
-
-    # زر خروج المشرف
-    if st.sidebar.button("🚪 تسجيل خروج المشرف"):
-        st.session_state['is_admin'] = False
-        st.rerun()
+    else:
+        st.success("✅ أنت مسجل دخول بصفتك مشرف النظام.")
         
-    # عرض قاعدة بيانات المستخدمين للمتابعة
+        # زر خروج المشرف
+        if st.button("🚪 خروج المشرف"):
+            st.session_state['is_admin'] = False
+            st.rerun()
+
+# إذا كان المشرف مسجلاً للدخول، تظهر له لوحة التحكم لتفعيل المستخدمين فوراً
+if st.session_state['is_admin']:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🛠️ لوحة التحكم السريعة للمشرف")
+    
+    # حقل لإدخال رقم هاتف المشترك المراد تفعيله
+    target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
+if st.sidebar.button("تفعيل اشتراك المستخدم"):
+    if target_phone:
+        try:
+            conn = sqlite3.connect("users_subscriptions.db")
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
+            conn.commit()
+            conn.close()
+            st.sidebar.success(f"تم تفعيل اشتراك الرقم {target_phone} بنجاح!")
+        except Exception as e:
+            st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
+    else:
+        st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
     with st.sidebar.expander("📋 عرض قاعدة بيانات المستخدمين"):
         try:
             conn = sqlite3.connect("users_subscriptions.db")
@@ -124,7 +121,6 @@ else:
             conn.close()
             st.dataframe(df_users, use_container_width=True)
         except Exception:
-            st.info("لا توجد بيانات مسجلة بعد.")
             st.info("لا توجد بيانات مسجلة بعد.")
 # شاشة تسجيل الدخول في الشريط الجانبي (Sidebar Login)
 # ==========================================
