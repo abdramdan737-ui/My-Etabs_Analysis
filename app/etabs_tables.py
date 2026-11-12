@@ -15,159 +15,142 @@ import os
 import streamlit as st
 
 # ==========================================
-# 🔐 نظام إدارة المستخدمين والاشتراكات (SQLite)
-# ==========================================
-def init_db():
-    conn = sqlite3.connect("users_subscriptions.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            phone TEXT PRIMARY KEY,
-            full_name TEXT,
-            usage_count INTEGER DEFAULT 0,
-            is_subscribed INTEGER DEFAULT 0,
-            expiry_date TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def check_user_access(phone, full_name):
-    conn = sqlite3.connect("users_subscriptions.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT usage_count, is_subscribed FROM users WHERE phone = ?", (phone,))
-    row = cursor.fetchone()
-    
-    if row is None:
-        # مستخدم جديد: يمنح 2 محاولات مجانية
-        cursor.execute("INSERT INTO users (phone, full_name, usage_count, is_subscribed) VALUES (?, ?, 1, 0)", (phone, full_name))
-        conn.commit()
-        conn.close()
-        return True, "مرحباً بك! هذه هي تجربتك المجانية الأولى (يتبقى لديك محاولة واحدة)."
-    
-    usage_count, is_subscribed = row
-    
-    if is_subscribed == 1:
-        conn.close()
-        return True, "أهلاً بك! اشتراكك مفعل وصالح."
-    
-    if usage_count < 2:
-        # زيادة عداد الاستخدام المجاني
-        new_count = usage_count + 1
-        cursor.execute("UPDATE users SET usage_count = ? WHERE phone = ?", (new_count, phone))
-        conn.commit()
-        conn.close()
-        remaining = 2 - new_count
-        return True, f"مرحباً بك! لقد استخدمت محاولة مجانية، ويتبقى لديك {remaining} محاولة."
-    
-    conn.close()
-    return False, "لقد استنفذت مرات الدخول المجانية (مرتان). يلزم الاشتراك لتمرير مشاريعك."
 
 # ==========================================
+# 🔐 نظام تسجيل الدخول للمنصة
 # ==========================================
-# 👑 نظام دخول وخروج المشرف (Admin Panel)
-# ==========================================
+
+# 1. تهيئة متغيرات الجلسة
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+
 if 'is_admin' not in st.session_state:
     st.session_state['is_admin'] = False
 
-st.sidebar.markdown("---")
-
-# زر أو قسم خاص بالمشرف في أسفل الشريط الجانبي
-with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
-    if not st.session_state['is_admin']:
-        admin_pass = st.text_input("كلمة سر المشرف", type="password")
-        if st.button("دخول كـ مشرف"):
-            # كلمة السر الخاصة بك (يمكنك تغييرها كما تشاء)
-            if admin_pass == "abosadeer_1987": 
-                st.session_state['is_admin'] = True
-                st.success("تم تسجيل دخول المشرف بنجاح!")
-                st.rerun()
-            else:
-                st.error("كلمة السر غير صحيحة.")
-    else:
-        st.success("✅ أنت مسجل دخول بصفتك مشرف النظام.")
-        
-        # زر خروج المشرف
-        if st.button("🚪 خروج المشرف"):
-            st.session_state['is_admin'] = False
-            st.rerun()
-
-# إذا كان المشرف مسجلاً للدخول، تظهر له لوحة التحكم لتفعيل المستخدمين فوراً
-if st.session_state['is_admin']:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🛠️ لوحة التحكم السريعة للمشرف")
-    # التحقق من تسجيل الدخول أو صلاحية المشرف لتخطي شاشة القفل وعرض المنصة
-
-    # حقل لإدخال رقم هاتف المشترك المراد تفعيله
-    target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
-if st.sidebar.button("تفعيل اشتراك المستخدم"):
-    if target_phone:
-        try:
-            conn = sqlite3.connect("users_subscriptions.db")
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
-            conn.commit()
-            conn.close()
-            st.sidebar.success(f"تم تفعيل اشتراك الرقم {target_phone} بنجاح!")
-        except Exception as e:
-            st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
-    else:
-        st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
-    with st.sidebar.expander("📋 عرض قاعدة بيانات المستخدمين"):
-        try:
-            conn = sqlite3.connect("users_subscriptions.db")
-            df_users = pd.read_sql_query("SELECT phone, full_name, usage_count, is_subscribed FROM users", conn)
-            conn.close()
-            st.dataframe(df_users, use_container_width=True)
-        except Exception:
-            st.info("لا توجد بيانات مسجلة بعد.")
-# شاشة تسجيل الدخول في الشريط الجانبي (Sidebar Login)
-# ==========================================
-st.sidebar.header("🔑 تسجيل الدخول للمنصة")
-
-if 'logged_in' not in st.session_state:
-    st.session_state['logged_in'] = False
+if 'user_phone' not in st.session_state:
     st.session_state['user_phone'] = ""
 
-if not st.session_state['logged_in']:
-    with st.sidebar.form("login_form"):
-        st.markdown("أدخل بياناتك للبدء (تحصل على **مرتين مجاناً**):")
-        input_name = st.text_input("الاسم الكامل")
-        input_phone = st.text_input("رقم هاتف واتسااب")
-        submit_login = st.form_submit_button("دخول للمنصة")
-if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', False):
-       st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من الشريط الجانبي للوصول إلى أدوات التدقيق الهندسية.")
-       st.stop()
-if submit_login:
-            if input_name and input_phone:
-                allowed, msg = check_user_access(input_phone, input_name)
-                if allowed:
-                    st.session_state['logged_in'] = True
-                    st.session_state['user_phone'] = input_phone
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.error(msg)
-            else:
-                st.sidebar.warning("⚠️ يرجى إدخال الاسم ورقم الواتساب بشكل صحيح.")
+if 'user_name' not in st.session_state:
+    st.session_state['user_name'] = ""
 
-# إذا لم يتم تسجيل الدخول، يتم إيقاف عرض باقي المنصة وعرض تفاصيل الدفع (Qi Card) عند النفاد
-if not st.session_state['logged_in']:
-    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من القائمة الجانبية للوصول إلى أدوات التدقيق الإنشائي والنوتة الحسابية.")
-    
-    with st.expander("💳 تفاصيل الاشتراكات وطريقة الدفع (عبر كي كارد)", expanded=True):
-        st.markdown("""
-        بعد انتهاء المرتين المجانيتين، يمكنك الاشتراك لإتاحة المنصة بلا حدود:
-        * **خطط الاشتراكات المتاحة:** (15$ شهرية 📅 /40$ ربع سنوية 📊 /100$ سنوية 🏆)
-        * **طريقة الدفع عبر الكي كارد بالدولار):**
-          * تحويل المبلغ المطلوب إلى رقم الحساب الشخصي كي كارد: `4269127660`
-          * أخذ صورة لـ (إيصال التحويل / السكرين شوت).
-          * إرسال الإيصال مع رقم هاتفك عبر واتساب للإدارة لتفعيل الحساب فوراً: 
-            [📱 تواصل عبر واتساب للتفعيل](https://wa.me/9647740884754)
-        """)
+
+# ==========================================
+# 2. تسجيل دخول المشرف
+# ==========================================
+
+st.sidebar.markdown("---")
+st.sidebar.header("👑 بوابة المشرف")
+
+if not st.session_state['is_admin']:
+
+    with st.sidebar.form("admin_login_form"):
+        admin_pass = st.text_input(
+            "كلمة مرور المشرف",
+            type="password"
+        )
+
+        admin_submit = st.form_submit_button("دخول المشرف")
+
+    if admin_submit:
+
+        if admin_pass == ADMIN_PASSWORD and ADMIN_PASSWORD:
+
+            st.session_state['is_admin'] = True
+
+            st.success("تم تسجيل دخول المشرف بنجاح.")
+
+            st.rerun()
+
+        else:
+            st.sidebar.error("كلمة المرور غير صحيحة.")
+
+else:
+
+    st.sidebar.success("👑 أنت مسجل الدخول بصفتك مشرفاً.")
+
+    if st.sidebar.button("🚪 خروج المشرف"):
+
+        st.session_state['is_admin'] = False
+
+        st.rerun()
+
+
+# ==========================================
+# 3. تسجيل دخول المستخدم العادي
+# ==========================================
+
+if not st.session_state['logged_in'] and not st.session_state['is_admin']:
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔑 تسجيل الدخول للمنصة")
+
+    with st.sidebar.form("login_form"):
+
+        st.markdown(
+            "أدخل بياناتك للبدء (تحصل على **مرتين مجاناً**):"
+        )
+
+        input_name = st.text_input("الاسم الكامل")
+        input_phone = st.text_input("رقم هاتف واتساب")
+
+        submit_login = st.form_submit_button("دخول للمنصة")
+
+    if submit_login:
+
+        if input_name.strip() and input_phone.strip():
+
+            allowed, msg = check_user_access(
+                input_phone.strip(),
+                input_name.strip()
+            )
+
+            if allowed:
+
+                st.session_state['logged_in'] = True
+                st.session_state['user_phone'] = input_phone.strip()
+                st.session_state['user_name'] = input_name.strip()
+
+                st.sidebar.success(msg)
+
+                st.rerun()
+
+            else:
+
+                st.sidebar.error(msg)
+
+        else:
+
+            st.sidebar.warning("يرجى إدخال الاسم ورقم الهاتف.")
+
+
+# ==========================================
+# 4. حماية الصفحة الرئيسية
+# ==========================================
+
+if not st.session_state['logged_in'] and not st.session_state['is_admin']:
+
+    st.warning(
+        "🔒 **المنصة محمية:** يرجى تسجيل الدخول "
+        "للوصول إلى أدوات التدقيق الهندسية."
+    )
+
     st.stop()
+
+
+# ==========================================
+# 5. تحديد صلاحية الدخول
+# ==========================================
+
+if st.session_state['is_admin']:
+
+    st.success("👑 مرحباً بك في المنصة، مشرف النظام.")
+
+elif st.session_state['logged_in']:
+
+    st.success(
+        f"مرحباً بك {st.session_state['user_name']} في منصة إنشاءات."
+    )
+
 # إدارة الملفات المرفوعة بأمان في الذاكرة المؤقتة (Session State)
 # ==========================================
 st.sidebar.header("📁 إدارة ملفات البيانات (ETABS Results)")
