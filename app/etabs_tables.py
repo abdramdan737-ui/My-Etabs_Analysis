@@ -19,11 +19,6 @@ import streamlit as st
 # 🔐 نظام إدارة الدخول والصلاحيات والاشتراكات
 # ==========================================
 
-import os
-import sqlite3
-import pandas as pd
-import streamlit as st
-
 DB_PATH = "users_subscriptions.db"
 
 # ==========================================
@@ -130,8 +125,7 @@ if not st.session_state['logged_in'] and not st.session_state['is_admin']:
 
             allowed, msg = check_user_access(
                 input_phone.strip(),
-                input_name.strip()
-            )
+                input_name.strip()           )
 
             if allowed:
 
