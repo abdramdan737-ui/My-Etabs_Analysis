@@ -66,6 +66,66 @@ def check_user_access(phone, full_name):
     return False, "لقد استنفذت مرات الدخول المجانية (مرتان). يلزم الاشتراك لتمرير مشاريعك."
 
 # ==========================================
+# ==========================================
+# 👑 نظام دخول وخروج المشرف (Admin Panel)
+# ==========================================
+if 'is_admin' not in st.session_state:
+    st.session_state['is_admin'] = False
+
+st.sidebar.markdown("---")
+
+# زر أو قسم خاص بالمشرف في أسفل الشريط الجانبي
+with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
+    if not st.session_state['is_admin']:
+        admin_pass = st.text_input("كلمة سر المشرف", type="password")
+        if st.button("دخول كـ مشرف"):
+            # كلمة السر الخاصة بك (يمكنك تغييرها كما تشاء)
+            if admin_pass == "Admin12345": 
+                st.session_state['is_admin'] = True
+                st.success("تم تسجيل دخول المشرف بنجاح!")
+                st.rerun()
+            else:
+                st.error("كلمة السر غير صحيحة.")
+    else:
+        st.success("✅ أنت مسجل دخول بصفتك مشرف النظام.")
+        
+        # زر خروج المشرف
+        if st.button("🚪 خروج المشرف"):
+            st.session_state['is_admin'] = False
+            st.rerun()
+
+# إذا كان المشرف مسجلاً للدخول، تظهر له لوحة التحكم لتفعيل المستخدمين فوراً
+if st.session_state['is_admin']:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🛠️ لوحة التحكم السريعة للمشرف")
+    
+    # حقل لإدخال رقم هاتف المشترك المراد تفعيله
+    target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
+    
+    if st.sidebar.button("✅ تفعيل اشتراك المستخدم"):
+        if target_phone:
+            try:
+                conn = sqlite3.connect("users_subscriptions.db")
+                cursor = conn.cursor()
+                # تحديث حالة الاشتراك وجعله مفعل (is_subscribed = 1)
+                cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
+                conn.commit()
+                conn.close()
+                st.sidebar.success(fاخر تحديث: تم تفعيل اشتراك الرقم {target_phone} بنجاح! 🎉")
+            except Exception as e:
+                st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
+        else:
+            st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
+            
+    # عرض قائمة بسيطة بالمشتركين المسجلين في قاعدة البيانات للمتابعة
+    with st.sidebar.expander("📋 عرض قاعدة بيانات المستخدمين"):
+        try:
+            conn = sqlite3.connect("users_subscriptions.db")
+            df_users = pd.read_sql_query("SELECT phone, full_name, usage_count, is_subscribed FROM users", conn)
+            conn.close()
+            st.dataframe(df_users, use_container_width=True)
+        except Exception:
+            st.info("لا توجد بيانات مسجلة بعد.")
 # شاشة تسجيل الدخول في الشريط الجانبي (Sidebar Login)
 # ==========================================
 st.sidebar.header("🔑 تسجيل الدخول للمنصة")
