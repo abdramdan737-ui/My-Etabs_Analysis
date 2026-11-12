@@ -103,19 +103,18 @@ if st.session_state['is_admin']:
     target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
     
     if st.sidebar.button("✅ تفعيل اشتراك المستخدم"):
-        if target_phone:
-            try:
-                conn = sqlite3.connect("users_subscriptions.db")
-                cursor = conn.cursor()
-                # تحديث حالة الاشتراك وجعله مفعل (is_subscribed = 1)
-                cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
-                conn.commit()
-                conn.close()
+    if target_phone:
+        try:
+            conn = sqlite3.connect("users_subscriptions.db")
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
+            conn.commit()
+            conn.close()
             st.sidebar.success(f"تم تفعيل اشتراك الرقم {target_phone} بنجاح!")
-            except Exception as e:
-                st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
-        else:
-            st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
+        except Exception as e:
+            st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
+    else:
+        st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
             
     # عرض قائمة بسيطة بالمشتركين المسجلين في قاعدة البيانات للمتابعة
     with st.sidebar.expander("📋 عرض قاعدة بيانات المستخدمين"):
