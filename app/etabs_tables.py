@@ -99,9 +99,7 @@ if st.session_state['is_admin']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛠️ لوحة التحكم السريعة للمشرف")
     # التحقق من تسجيل الدخول أو صلاحية المشرف لتخطي شاشة القفل وعرض المنصة
-if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', False):
-    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من الشريط الجانبي للوصول إلى أدوات التدقيق الهندسية.")
-    st.stop()
+
     # حقل لإدخال رقم هاتف المشترك المراد تفعيله
     target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
 if st.sidebar.button("تفعيل اشتراك المستخدم"):
@@ -139,7 +137,9 @@ if not st.session_state['logged_in']:
         input_name = st.text_input("الاسم الكامل")
         input_phone = st.text_input("رقم هاتف واتسااب")
         submit_login = st.form_submit_button("دخول للمنصة")
-        
+        if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', False):
+    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من الشريط الجانبي للوصول إلى أدوات التدقيق الهندسية.")
+    st.stop()
         if submit_login:
             if input_name and input_phone:
                 allowed, msg = check_user_access(input_phone, input_name)
