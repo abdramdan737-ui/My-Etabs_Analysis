@@ -9,7 +9,131 @@ from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+# ==========================================
+# إدارة الملفات المرفوعة بأمان في الذاكرة المؤقتة (Session State)
+# ==========================================
+st.sidebar.header("📁 إدارة ملفات البيانات (ETABS Results)")
 
+uploaded_file = st.sidebar.file_uploader(
+    "1️⃣ قم برفع ملف البيانات الأولية (results.xlsx)", 
+    type=["xlsx", "xls"],
+    help="يتم قراءة الملف مؤقتاً في الذاكرة الجلسوية للحفاظ على السرية وعدم حفظه على القرص."
+)
+
+# تهيئة الذاكرة المؤقتة لبيانات الجلسة إن لمג تكن موجودة
+if 'session_sheets_data' not in st.session_state:
+    st.session_state['session_sheets_data'] = None
+if 'session_sheet_names' not in st.session_state:
+    st.session_state['session_sheet_names'] = []
+
+# التعامل مع الملف المرفوع في الذاكرة المؤقتة حصرياً دون حفظه على القرص
+if uploaded_file is not None:
+    try:
+        # قراءة ملف الإكسيل مباشرة من الذاكرة (BytesIO) دون كتابته على الهارد
+        bytes_data = uploaded_file.getvalue()
+        excel_buffer = io.BytesIO(bytes_data)
+        xls_obj = pd.ExcelFile(excel_buffer)
+        
+        # تخزين أسماء الأوراق والبيانات في الذاكرة المؤقتة للجلسة فقط
+        st.session_state['session_sheet_names'] = xls_obj.sheet_names
+        
+        # قراءة الأوراق الاحتياطية لتكون متاحة للجداول
+        sheets_dict = {}
+        for s in xls_obj.sheet_names:
+            sheets_dict[s] = pd.read_excel(excel_buffer, sheet_name=s)
+        st.session_state['session_sheets_data'] = sheets_dict
+        
+        st.sidebar.success("✅ تمت معالجة وقراءة الملف مؤقتاً في الذاكرة بنجاح!")
+    except Exception as e:
+        st.sidebar.error(f"❌ حدث خطأ أثناء قراءة الملف: {e}")
+
+# التحقق من توفر البيانات (سواء المرفوعة مؤقتاً في الذاكرة أو الملف الافتراضي المحلي إن وجد)
+active_sheets = st.session_state['session_sheet_names']
+active_data = st.session_state['session_sheets_data']
+
+# إذا لم يتم رفع أي ملف ولا يوجد ملف افتراضي، يتم التنبيه وإيقاف التنفيذ
+local_default_path = os.path.join(os.getcwd(), "result_tables.xlsx")
+
+if not active_sheets and not os.path.exists(local_default_path):
+    st.error("🚨 **تنبيه هام جداً:** لا يمكن المتابعة أو الحصول على أي نتائج هندسية لعدم توفر بيانات الإدخال!")
+    
+    with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق (Sheets) الضرورية", expanded=True):
+        st.markdown("""
+        لضمان عمل المنصة واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي:
+        
+        1. **طريقة الرفع:** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف المسمى باسم **`results.xlsx`**.
+        2. **أسماء الأوراق الضرورية في ملف الإكسيل:**
+           يجب أن يحتوي ملف الإكسيل على الأوراق التالية مطابقة لتنفيذ المعالجات والتدقيق لضمان التدقيق الأولي:
+           * ورقة **`Story Stiffness`**: تدقيق صلابة الطوابق الجانبية.
+           * ورقة **`Story Max Over Avg Disp`**: تدقيق نسبة الانجرافات القصوى إلى المتوسطة لكل طابق.
+           * ورقة **`Modal Participating Mass Ratios`**: تدقيق نسبة مشاركة الكتلة لكل نمط.
+           * ورقة **`Story Drifts`**: تدقيق انجرافات الطوابق النسبية.
+           * ورقة **`Centers Of Mass And Rigidity`**: تدقيق مراكز الكتلة والصلابة لكل طابق.
+           * ورقة **`Base Reactions`**: تدقيق قوى القص القاعدي ومقارنة الاستاتيكي والديناميكي.
+        """)
+    st.stop()
+
+# تحديد مصدر قراءة الجداول (الذاكرة المؤقتة للجلسة لها الأولوية المطلقة لكي لا تتأثر الملفات الافتراضية)
+def get_dynamic_sheet_df(base_name):
+    if active_data and active_sheets:
+        target_sheet = get_sheet_by_name(active_sheets, base_name)
+        if target_sheet and target_sheet in active_data:
+            return active_data[target_sheet]
+    # العودة للملف الافتراضي المحلي إن لم يُرفع ملف جديد
+    if os.path.exists(local_default_path):
+        try:
+            return pd.read_excel(local_default_path, sheet_name=get_sheet_by_name(pd.ExcelFile(local_default_path).sheet_names, base_name))
+        except:
+            return pd.DataFrame()
+    return pd.DataFrame()
+# ==========================================
+import os
+import pandas as pd
+import streamlit as st
+
+# ==========================================
+# نظام إدارة ورفع الملف المعتمد (results.xlsx)
+# ==========================================
+st.sidebar.header("📁 إدارة الملف المعتمد للمعالجة")
+
+current_dir = os.getcwd()
+target_file_path = os.path.join(current_dir, "results.xlsx")
+
+# إذا قام المستخدم برفع ملف جديد، يتم استبدال الملف الحالي المعتمد في مسار العمل
+if uploaded_file is not None:
+    try:
+        with open(target_file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.sidebar.success("✅ تم استبدال وتحديث الملف المعتمد (results.xlsx) بنجاح!")
+    except Exception as e:
+        st.sidebar.error(f"❌ حدث خطأ أثناء حفظ الملف: {e}")
+
+# التحقق الإلزامي من وجود الملف المعتمد للمعالجة
+if not os.path.exists(target_file_path):
+    st.error("🚨 **تنبيه هام جداً:** لا يمكن المتابعة أو الحصول على أي نتائج لعدم توفر ملف البيانات المعتمد (`results.xlsx`)!")
+    
+    with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق  الضرورية", expanded=True):
+        st.markdown(
+            "لضمان عمل التطبيق واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي:\n\n"
+            "1. **طريقة الرفع:** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف وتسميته باسم **`results.xlsx`**.\n"
+            "2. **أسماء الأوراق الضرورية في ملف الإكسيل:**\n"
+            "يجب أن يحتوي ملف الإكسيل على الأوراق التالية على الاقل لضمان التدقيق الأولي:\n"
+            "* ورقة **`Story Stiffness`**: تدقيق صلابة الطوابق الجانبية.\n"
+            "* ورقة **`Story Max Over Avg Disp`**: تدقيق نسبة الانجرافات القصوى إلى المتوسطة لكل طابق.\n"
+            "* ورقة **`Modal Participating Mass Ratios`**: تدقيق نسبة مشاركة الكتلة لكل نمط.\n"
+            "* ورقة **`Story Drifts`**: تدقيق انجرافات الطوابق النسبية.\n"
+            "* ورقة **`Centers Of Mass And Rigidity`**: تدقيق مراكز الكتلة والصلابة لكل طابق.\n"
+            "* ورقة **`Base Reactions`**: تدقيق قوى القص القاعدي ومقارنة الاستاتيكي والديناميكي."
+        )
+    st.stop()
+
+# قراءة الأوراق من الملف المعتمد (results.xlsx) فور توفره
+try:
+    xls_file = pd.ExcelFile(target_file_path)
+    sheet_names = xls_file.sheet_names
+except Exception as e:
+    st.error(f"⚠️ تعذّر قراءة محتويات ملف الإكسيل المعتمد: {e}")
+    sheet_names = []
 # ==========================================
 # إعدادات واجهة التطبيق
 # ==========================================
