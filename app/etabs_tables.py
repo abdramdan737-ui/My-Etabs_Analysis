@@ -101,8 +101,6 @@ if st.session_state['is_admin']:
     
     # حقل لإدخال رقم هاتف المشترك المراد تفعيله
     target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
-    target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
-
 if st.sidebar.button("تفعيل اشتراك المستخدم"):
     if target_phone:
         try:
