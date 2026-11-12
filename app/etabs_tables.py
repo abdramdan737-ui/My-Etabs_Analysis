@@ -98,7 +98,10 @@ with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
 if st.session_state['is_admin']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛠️ لوحة التحكم السريعة للمشرف")
-    
+    # التحقق من تسجيل الدخول أو صلاحية المشرف لتخطي شاشة القفل وعرض المنصة
+if not st.session_state.get('logged_in', False) and not st.session_state.get('is_admin', False):
+    st.warning("🔒 **المنصة محمية:** يرجى تسجيل الدخول من الشريط الجانبي للوصول إلى أدوات التدقيق الهندسية.")
+    st.stop()
     # حقل لإدخال رقم هاتف المشترك المراد تفعيله
     target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
 if st.sidebar.button("تفعيل اشتراك المستخدم"):
