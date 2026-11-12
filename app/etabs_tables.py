@@ -15,238 +15,115 @@ import os
 import streamlit as st
 
 # ==========================================
+# 🔐 نظام إدارة المستخدمين والاشتراكات (SQLite)
+# ==========================================
+def init_db():
+    conn = sqlite3.connect("users_subscriptions.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            phone TEXT PRIMARY KEY,
+            full_name TEXT,
+            usage_count INTEGER DEFAULT 0,
+            is_subscribed INTEGER DEFAULT 0,
+            expiry_date TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def check_user_access(phone, full_name):
+    conn = sqlite3.connect("users_subscriptions.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT usage_count, is_subscribed FROM users WHERE phone = ?", (phone,))
+    row = cursor.fetchone()
+    
+    if row is None:
+        # مستخدم جديد: يمنح 2 محاولات مجانية
+        cursor.execute("INSERT INTO users (phone, full_name, usage_count, is_subscribed) VALUES (?, ?, 1, 0)", (phone, full_name))
+        conn.commit()
+        conn.close()
+        return True, "مرحباً بك! هذه هي تجربتك المجانية الأولى (يتبقى لديك محاولة واحدة)."
+    
+    usage_count, is_subscribed = row
+    
+    if is_subscribed == 1:
+        conn.close()
+        return True, "أهلاً بك! اشتراكك مفعل وصالح."
+    
+    if usage_count < 2:
+        # زيادة عداد الاستخدام المجاني
+        new_count = usage_count + 1
+        cursor.execute("UPDATE users SET usage_count = ? WHERE phone = ?", (new_count, phone))
+        conn.commit()
+        conn.close()
+        remaining = 2 - new_count
+        return True, f"مرحباً بك! لقد استخدمت محاولة مجانية، ويتبقى لديك {remaining} محاولة."
+    
+    conn.close()
+    return False, "لقد استنفذت مرات الدخول المجانية (مرتان). يلزم الاشتراك لتمرير مشاريعك."
 
 # ==========================================
-# 👑 نظام إدارة المشرف (Admin Panel)
 # ==========================================
-
-import os
-import sqlite3
-import pandas as pd
-import streamlit as st
-
-# ------------------------------------------
-# 1. تهيئة حالة المشرف
-# ------------------------------------------
-
+# 👑 نظام دخول وخروج المشرف (Admin Panel)
+# ==========================================
 if 'is_admin' not in st.session_state:
     st.session_state['is_admin'] = False
 
-# قاعدة بيانات المستخدمين
-DB_PATH = "users_subscriptions.db"
-
-# كلمة مرور المشرف من إعدادات الأسرار أو متغيرات البيئة
-ADMIN_PASSWORD = st.secrets.get(
-    "ADMIN_PASSWORD",
-    os.getenv("ADMIN_PASSWORD", "")
-)
-
-# ------------------------------------------
-# 2. بوابة دخول وخروج المشرف
-# ------------------------------------------
-
 st.sidebar.markdown("---")
 
-with st.sidebar.expander("👑 بوابة المشرف (الإدارة)", expanded=False):
-
+# زر أو قسم خاص بالمشرف في أسفل الشريط الجانبي
+with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
     if not st.session_state['is_admin']:
-
-        st.markdown("### 🔐 تسجيل دخول المشرف")
-
-        admin_pass = st.text_input(
-            "كلمة سر المشرف",
-            type="password",
-            key="admin_password_input"
-        )
-
-        if st.button("👑 دخول كـ مشرف", key="admin_login_btn"):
-
-            if not ADMIN_PASSWORD:
-                st.error("لم يتم إعداد كلمة مرور المشرف في إعدادات النظام.")
-
-            elif admin_pass == ADMIN_PASSWORD:
-
+        admin_pass = st.text_input("كلمة سر المشرف", type="password")
+        if st.button("دخول كـ مشرف"):
+            # كلمة السر الخاصة بك (يمكنك تغييرها كما تشاء)
+            if admin_pass == "abosadeer_1987": 
                 st.session_state['is_admin'] = True
-
                 st.success("تم تسجيل دخول المشرف بنجاح!")
-
                 st.rerun()
-
             else:
-                st.error("كلمة المرور غير صحيحة.")
-
+                st.error("كلمة السر غير صحيحة.")
     else:
-
         st.success("✅ أنت مسجل دخول بصفتك مشرف النظام.")
-
-        if st.button("🚪 خروج المشرف", key="admin_logout_btn"):
-
+        
+        # زر خروج المشرف
+        if st.button("🚪 خروج المشرف"):
             st.session_state['is_admin'] = False
-
             st.rerun()
 
-
-# ==========================================
-# 3. لوحة تحكم المشرف
-# ==========================================
-
+# إذا كان المشرف مسجلاً للدخول، تظهر له لوحة التحكم لتفعيل المستخدمين فوراً
 if st.session_state['is_admin']:
-
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛠️ لوحة التحكم السريعة")
+    st.sidebar.subheader("🛠️ لوحة التحكم السريعة للمشرف")
+    # التحقق من تسجيل الدخول أو صلاحية المشرف لتخطي شاشة القفل وعرض المنصة
 
-    # --------------------------------------
-    # 3.1 تفعيل اشتراك المستخدم
-    # --------------------------------------
-
-    st.sidebar.markdown("#### 💳 تفعيل اشتراك المستخدم")
-
-    target_phone = st.sidebar.text_input(
-        "رقم هاتف المشترك مع رمز الدولة",
-        key="target_phone_input",
-        placeholder="مثال: 9647XXXXXXXXX"
-    )
-
-    if st.sidebar.button(
-        "✅ تفعيل الاشتراك",
-        key="activate_subscription_btn",
-        use_container_width=True
-    ):
-
-        if target_phone.strip():
-
-            try:
-                with sqlite3.connect(DB_PATH) as conn:
-
-                    cursor = conn.cursor()
-
-                    cursor.execute(
-                        """
-                        UPDATE users
-                        SET is_subscribed = 1
-                        WHERE phone = ?
-                        """,
-                        (target_phone.strip(),)
-                    )
-
-                    affected_rows = cursor.rowcount
-
-                if affected_rows > 0:
-
-                    st.sidebar.success(
-                        f"تم تفعيل اشتراك الرقم {target_phone} بنجاح."
-                    )
-
-                else:
-
-                    st.sidebar.warning(
-                        "لم يتم العثور على مستخدم بهذا الرقم."
-                    )
-
-            except sqlite3.Error as e:
-
-                st.sidebar.error(
-                    f"حدث خطأ أثناء تفعيل الاشتراك: {e}"
-                )
-
-        else:
-
-            st.sidebar.warning(
-                "يرجى إدخال رقم هاتف المستخدم أولاً."
-            )
-
-    # --------------------------------------
-    # 3.2 عرض قاعدة بيانات المستخدمين
-    # --------------------------------------
-
-    st.sidebar.markdown("---")
-
-    with st.sidebar.expander("📋 عرض قاعدة بيانات المستخدمين"):
-
+    # حقل لإدخال رقم هاتف المشترك المراد تفعيله
+    target_phone = st.sidebar.text_input("رقم هاتف المشترك للتفعيل (مع الرمز)")
+if st.sidebar.button("تفعيل اشتراك المستخدم"):
+    if target_phone:
         try:
-
-            with sqlite3.connect(DB_PATH) as conn:
-
-                df_users = pd.read_sql_query(
-                    """
-                    SELECT
-                        phone AS 'رقم الهاتف',
-                        full_name AS 'اسم المستخدم',
-                        usage_count AS 'عدد مرات الاستخدام',
-                        is_subscribed AS 'حالة الاشتراك'
-                    FROM users
-                    ORDER BY usage_count DESC
-                    """,
-                    conn
-                )
-
-            if not df_users.empty:
-
-                st.dataframe(
-                    df_users,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                st.caption(
-                    f"إجمالي المستخدمين: {len(df_users)}"
-                )
-
-            else:
-
-                st.info("قاعدة البيانات لا تحتوي على مستخدمين.")
-
-        except sqlite3.Error as e:
-
-            st.warning(
-                f"تعذر قراءة قاعدة بيانات المستخدمين: {e}"
-            )
-
-    # --------------------------------------
-    # 3.3 إحصائيات سريعة للمشرف
-    # --------------------------------------
-
-    try:
-
-        with sqlite3.connect(DB_PATH) as conn:
-
-            stats = pd.read_sql_query(
-                """
-                SELECT
-                    COUNT(*) AS total_users,
-                    SUM(CASE WHEN is_subscribed = 1
-                        THEN 1 ELSE 0 END) AS subscribed_users,
-                    SUM(CASE WHEN is_subscribed = 0
-                        THEN 1 ELSE 0 END) AS free_users
-                FROM users
-                """,
-                conn
-            )
-
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("#### 📊 إحصائيات المنصة")
-
-        if not stats.empty:
-
-            st.sidebar.metric(
-                "إجمالي المستخدمين",
-                int(stats.iloc[0]["total_users"] or 0)
-            )
-
-            st.sidebar.metric(
-                "المشتركون المدفوعون",
-                int(stats.iloc[0]["subscribed_users"] or 0)
-            )
-
-            st.sidebar.metric(
-                "المستخدمون غير المشتركين",
-                int(stats.iloc[0]["free_users"] or 0)
-            )
-
-    except sqlite3.Error:
-
-        st.sidebar.info("الإحصائيات غير متاحة حالياً.")
-
+            conn = sqlite3.connect("users_subscriptions.db")
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET is_subscribed = 1 WHERE phone = ?", (target_phone,))
+            conn.commit()
+            conn.close()
+            st.sidebar.success(f"تم تفعيل اشتراك الرقم {target_phone} بنجاح!")
+        except Exception as e:
+            st.sidebar.error(f"خطأ أثناء التفعيل: {e}")
+    else:
+        st.sidebar.warning("يرجى إدخال رقم الهاتف أولاً.")
+    with st.sidebar.expander("📋 عرض قاعدة بيانات المستخدمين"):
+        try:
+            conn = sqlite3.connect("users_subscriptions.db")
+            df_users = pd.read_sql_query("SELECT phone, full_name, usage_count, is_subscribed FROM users", conn)
+            conn.close()
+            st.dataframe(df_users, use_container_width=True)
+        except Exception:
+            st.info("لا توجد بيانات مسجلة بعد.")
+# شاشة تسجيل الدخول في الشريط الجانبي (Sidebar Login)
 # ==========================================
 st.sidebar.header("🔑 تسجيل الدخول للمنصة")
 
