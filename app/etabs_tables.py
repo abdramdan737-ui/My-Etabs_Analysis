@@ -10,411 +10,110 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 # ==========================================
+# تسجيل مجاني مبسط: الاسم ورقم الهاتف فقط
+# لا توجد كلمات مرور أو OTP أو Google OAuth أو اشتراكات أو حدود استخدام
+# ==========================================
 import sqlite3
+import re
+st.set_page_config(page_title="منصة تدقيق نتائج ETABS وتوليد النوتة الحسابية", layout="wide")
 
-# ==========================================
-# 🔐 نظام إدارة الدخول والصلاحيات والاشتراكات
-# ==========================================
-import hmac
-from datetime import date, datetime, timedelta
+USERS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform_users.db")
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users_subscriptions.db")
-FREE_USES = 2
+def normalize_phone(raw):
+    """توحيد الأرقام العربية والهندية وإزالة الفواصل مع إبقاء الرقم كنص."""
+    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+    value = str(raw or "").translate(trans).strip()
+    value = re.sub(r"[\s()\-]", "", value)
+    return value
 
-def _db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    with _db() as conn:
+def init_users_database():
+    with sqlite3.connect(USERS_DB_PATH) as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                phone            TEXT PRIMARY KEY,
-                name             TEXT NOT NULL,
-                free_uses_left   INTEGER NOT NULL DEFAULT 2,
-                subscription_end TEXT,              -- YYYY-MM-DD
-                is_blocked       INTEGER NOT NULL DEFAULT 0,
-                created_at       TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS platform_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                phone TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.commit()
 
-def normalize_phone(raw: str) -> str:
-    """أرقام عربية-هندية -> لاتينية، حذف الرموز، توحيد 964 إلى 0."""
-    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-    digits = "".join(ch for ch in raw.translate(trans) if ch.isdigit())
-    if digits.startswith("964"):
-        digits = "0" + digits[3:]
-    elif digits and not digits.startswith("0"):
-        digits = "0" + digits
-    return digits
+def render_free_access_gate():
+    init_users_database()
 
-def check_user_access(phone: str, name: str):
-    """Returns (allowed: bool, msg: str). لا تستهلك تجربة، فقط تتحقق."""
-    phone = normalize_phone(phone)
-    if len(phone) < 10:
-        return False, "رقم الهاتف غير صالح"
-    try:
-        with _db() as conn:
-            row = conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
-            if row is None:
-                conn.execute(
-                    "INSERT INTO users (phone, name, free_uses_left, created_at) VALUES (?,?,?,?)",
-                    (phone, name.strip(), FREE_USES, datetime.now().isoformat(timespec="seconds")),
-                )
-                return True, f"أهلاً {name.strip()}، لديك {FREE_USES} استخدامات مجانية"
-    except sqlite3.Error as e:
-        return False, f"خطأ في قاعدة البيانات: {e}"
-
-    if row["is_blocked"]:
-        return False, "الحساب موقوف، تواصل مع المشرف"
-    end = row["subscription_end"]
-    if end and date.fromisoformat(end) >= date.today():
-        return True, f"أهلاً {row['name']}، اشتراكك ساري حتى {end}"
-    if row["free_uses_left"] > 0:
-        return True, f"أهلاً {row['name']}، المتبقي {row['free_uses_left']} استخدام مجاني"
-    return False, "انتهت التجربة المجانية، يلزم تفعيل اشتراك"
-
-def consume_free_use(phone: str) -> bool:
-    """استدعِها عند تنفيذ العملية الفعلية (توليد تقرير/تصدير). تتجاوز المشترك."""
-    with _db() as conn:
-        row = conn.execute("SELECT free_uses_left, subscription_end FROM users WHERE phone=?", (phone,)).fetchone()
-        if not row:
-            return False
-        if row["subscription_end"] and date.fromisoformat(row["subscription_end"]) >= date.today():
-            return True
-        cur = conn.execute(
-            "UPDATE users SET free_uses_left = free_uses_left - 1 WHERE phone=? AND free_uses_left > 0",
-            (phone,),
-        )
-        return cur.rowcount == 1
-
-def grant_subscription(phone: str, days: int = 30):
-    """للمشرف: تمديد من تاريخ الانتهاء الحالي إن كان ساريًا، وإلا من اليوم."""
-    with _db() as conn:
-        row = conn.execute("SELECT subscription_end FROM users WHERE phone=?", (phone,)).fetchone()
-        base = date.today()
-        if row and row["subscription_end"]:
-            base = max(base, date.fromisoformat(row["subscription_end"]))
-        conn.execute("UPDATE users SET subscription_end=? WHERE phone=?",
-                     ((base + timedelta(days=days)).isoformat(), phone))
-
-init_db()
-DB_PATH = "users_subscriptions.db"
-
-# ==========================================
-# 1. تهيئة متغيرات الجلسة
-# ==========================================
-
-session_defaults = {
-    'logged_in': False,
-    'is_admin': False,
-    'user_phone': '',
-    'user_name': ''
-}
-
-for key, value in session_defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-
-# ==========================================
-# 2. إعداد كلمة مرور المشرف
-# ==========================================
-
-ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "123456")  # ضع كلمة مرور المشرف هنا أو في ملف secrets.toml
-
-
-# ==========================================
-# 3. بوابة دخول وخروج المشرف
-# ==========================================
-
-st.sidebar.markdown("---")
-
-with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
-
-    if not st.session_state['is_admin']:
-
-        with st.form("admin_login_form"):
-
-            st.markdown("### 🔐 دخول المشرف")
-
-            admin_pass = st.text_input(
-                "كلمة مرور المشرف",
-                type="password"
-            )
-
-            admin_submit = st.form_submit_button(
-                "دخول كـ مشرف"
-            )
-
-        if admin_submit:
-
-            if ADMIN_PASSWORD and admin_pass == ADMIN_PASSWORD:
-
-                st.session_state['is_admin'] = True
-
-                st.sidebar.success(
-                    "تم تسجيل دخول المشرف بنجاح!"
-                )
-
+    if st.session_state.get("platform_logged_in", False):
+        user = st.session_state.get("platform_user", {})
+        with st.sidebar:
+            st.success(f"مرحباً {user.get('full_name', '')}")
+            st.caption(f"رقم الهاتف: {user.get('phone', '')}")
+            if st.button("تسجيل الخروج", key="platform_logout", use_container_width=True):
+                st.session_state.pop("platform_logged_in", None)
+                st.session_state.pop("platform_user", None)
                 st.rerun()
+        return True
 
+    st.title("منصة إنشاءات للاستشارات الهندسية")
+    st.subheader("الدخول المجاني إلى المنصة")
+    st.info("التسجيل متاح بالاسم ورقم الهاتف فقط. جميع أدوات المنصة متاحة مجاناً حالياً دون اشتراك أو حد لعدد مرات الاستخدام.")
+
+    tab_register, tab_login = st.tabs(["تسجيل مستخدم جديد", "دخول مستخدم مسجل"] )
+
+    with tab_register:
+        name = st.text_input("الاسم الكامل", key="platform_register_name")
+        phone = st.text_input("رقم الهاتف", key="platform_register_phone", placeholder="07XXXXXXXXX")
+        if st.button("إنشاء حساب مجاني", type="primary", key="platform_register_button", use_container_width=True):
+            clean_name = name.strip()
+            clean_phone = normalize_phone(phone)
+            if not clean_name or not clean_phone:
+                st.error("يرجى إدخال الاسم ورقم الهاتف.")
             else:
+                try:
+                    with sqlite3.connect(USERS_DB_PATH) as conn:
+                        conn.execute(
+                            "INSERT INTO platform_users (full_name, phone) VALUES (?, ?)",
+                            (clean_name, clean_phone)
+                        )
+                        conn.commit()
+                    st.session_state["platform_user"] = {"full_name": clean_name, "phone": clean_phone}
+                    st.session_state["platform_logged_in"] = True
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("رقم الهاتف مسجل مسبقاً. استخدم تبويب الدخول.")
+                except sqlite3.Error as exc:
+                    st.error(f"تعذر إنشاء الحساب بسبب خطأ في قاعدة البيانات: {exc}")
 
-                st.sidebar.error(
-                    "كلمة المرور غير صحيحة أو لم يتم إعدادها."
-                )
-
-    else:
-
-        st.success("👑 أنت مسجل دخول بصفتك مشرف النظام.")
-
-        if st.button("🚪 خروج المشرف", key="admin_logout"):
-
-            st.session_state['is_admin'] = False
-
-            st.rerun()
-
-
-# ==========================================
-# 4. تسجيل دخول المستخدم العادي
-# ==========================================
-
-if not st.session_state['logged_in'] and not st.session_state['is_admin']:
-
-    st.sidebar.markdown("---")
-    st.sidebar.header("🔑 تسجيل الدخول للمنصة")
-
-    with st.sidebar.form("user_login_form"):
-
-        st.markdown(
-            "أدخل بياناتك للبدء (تحصل على **مرتين مجاناً**):"
-        )
-
-        input_name = st.text_input("الاسم الكامل")
-
-        input_phone = st.text_input("رقم هاتف واتساب")
-
-        submit_login = st.form_submit_button(
-            "دخول للمنصة"
-        )
-
-    if submit_login:
-
-        if input_name.strip() and input_phone.strip():
-
-            allowed, msg = check_user_access(
-                input_phone.strip(),
-                input_name.strip()           )
-
-            if allowed:
-
-                st.session_state['logged_in'] = True
-
-                st.session_state['user_phone'] = input_phone.strip()
-
-                st.session_state['user_name'] = input_name.strip()
-
-                st.sidebar.success(msg)
-
-                st.rerun()
-
+    with tab_login:
+        login_name = st.text_input("الاسم الكامل", key="platform_login_name")
+        login_phone = st.text_input("رقم الهاتف", key="platform_login_phone")
+        if st.button("دخول إلى المنصة", key="platform_login_button", use_container_width=True):
+            clean_name = login_name.strip()
+            clean_phone = normalize_phone(login_phone)
+            if not clean_name or not clean_phone:
+                st.error("يرجى إدخال الاسم ورقم الهاتف.")
             else:
+                with sqlite3.connect(USERS_DB_PATH) as conn:
+                    row = conn.execute(
+                        "SELECT full_name, phone FROM platform_users WHERE full_name = ? AND phone = ?",
+                        (clean_name, clean_phone)
+                    ).fetchone()
+                if row:
+                    st.session_state["platform_user"] = {"full_name": row[0], "phone": row[1]}
+                    st.session_state["platform_logged_in"] = True
+                    st.rerun()
+                else:
+                    st.error("بيانات الدخول غير موجودة. تحقق من الاسم والرقم أو أنشئ حساباً جديداً.")
 
-                st.sidebar.error(msg)
+    st.caption("تنبيه: هذا تسجيل مبسط دون التحقق من ملكية رقم الهاتف؛ لا تستخدمه لحماية بيانات حساسة.")
+    return False
 
-        else:
-
-            st.sidebar.warning(
-                "يرجى إدخال الاسم الكامل ورقم الهاتف."
-            )
-
-
-# ==========================================
-# 5. التحقق من صلاحية الدخول للمنصة
-# ==========================================
-
-# المشرف أو المستخدم المسجل يستطيع الدخول
-
-if not st.session_state['logged_in'] and not st.session_state['is_admin']:
-
-    st.warning(
-        "🔒 **المنصة محمية:** يرجى تسجيل الدخول "
-        "من الشريط الجانبي للوصول إلى أدوات التدقيق الهندسية."
-    )
-
-    with st.expander(
-        "💳 تفاصيل الاشتراكات وطريقة الدفع (كي كارد)",
-        expanded=True
-    ):
-
-        st.markdown("""
-        بعد انتهاء المرتين المجانيتين يمكنك الاشتراك
-        للاستفادة من خدمات المنصة.
-
-        **خطط الاشتراك:**
-
-        - 15$ اشتراك شهري.
-        - 40$ اشتراك ربع سنوي.
-        - 100$ اشتراك سنوي.
-
-        **طريقة الدفع عبر كي كارد:**
-
-        1. تحويل المبلغ إلى حساب كي كارد المخصص.
-        2. إرسال صورة إيصال التحويل.
-        3. إرسال رقم الهاتف عبر واتساب للإدارة لتفعيل الحساب.
-        """)
-
-        st.markdown(
-            "[📱 التواصل مع الإدارة عبر واتساب](https://wa.me/9647740884754)"
-        )
-
+if not render_free_access_gate():
     st.stop()
 
+st.success(f"مرحباً بك {st.session_state['platform_user']['full_name']} في منصة إنشاءات للاستشارات الهندسية.")
 
 # ==========================================
-# 6. لوحة تحكم المشرف
+# يبدأ هنا محتوى المنصة وأدوات التدقيق دون فرض أي حدود استخدام
 # ==========================================
-
-if st.session_state['is_admin']:
-
-    st.sidebar.markdown("---")
-
-    st.sidebar.subheader(
-        "🛠️ لوحة التحكم السريعة للمشرف"
-    )
-
-    # --------------------------------------
-    # 6.1 تفعيل اشتراك المستخدم
-    # --------------------------------------
-
-    with st.sidebar.form("activate_user_form"):
-
-        target_phone = st.text_input(
-            "رقم هاتف المستخدم المراد تفعيله"
-        )
-
-        activate_submit = st.form_submit_button(
-            "✅ تفعيل اشتراك المستخدم"
-        )
-
-    if activate_submit:
-
-        if target_phone.strip():
-
-            try:
-
-                with sqlite3.connect(DB_PATH) as conn:
-
-                    cursor = conn.cursor()
-
-                    cursor.execute(
-                        """
-                        UPDATE users
-                        SET is_subscribed = 1
-                        WHERE phone = ?
-                        """,
-                        (target_phone.strip(),)
-                    )
-
-                    affected = cursor.rowcount
-
-                if affected > 0:
-
-                    st.sidebar.success(
-                        "تم تفعيل اشتراك المستخدم بنجاح."
-                    )
-
-                else:
-
-                    st.sidebar.warning(
-                        "رقم الهاتف غير موجود في قاعدة البيانات."
-                    )
-
-            except sqlite3.Error as e:
-
-                st.sidebar.error(
-                    f"خطأ في قاعدة البيانات: {e}"
-                )
-
-        else:
-
-            st.sidebar.warning(
-                "يرجى إدخال رقم الهاتف أولاً."
-            )
-
-    # --------------------------------------
-    # 6.2 عرض قاعدة بيانات المستخدمين
-    # --------------------------------------
-
-    with st.sidebar.expander(
-        "📋 عرض قاعدة بيانات المستخدمين"
-    ):
-
-        try:
-
-            with sqlite3.connect(DB_PATH) as conn:
-
-                df_users = pd.read_sql_query(
-                    """
-                    SELECT
-                        phone,
-                        full_name,
-                        usage_count,
-                        is_subscribed,
-                        expiry_date
-                    FROM users
-                    ORDER BY full_name
-                    """,
-                    conn
-                )
-
-            if not df_users.empty:
-
-                st.dataframe(
-                    df_users,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                st.caption(
-                    f"إجمالي المستخدمين: {len(df_users)}"
-                )
-
-            else:
-
-                st.info("لا توجد بيانات مستخدمين.")
-
-        except sqlite3.Error as e:
-
-            st.error(f"تعذر قراءة البيانات: {e}")
-
-
-# ==========================================
-# 7. رسالة الترحيب وتحديد نوع المستخدم
-# ==========================================
-
-if st.session_state['is_admin']:
-
-    st.success(
-        "👑 مرحباً بك، مشرف منصة إنشاءات للاستشارات الهندسية."
-    )
-
-elif st.session_state['logged_in']:
-
-    st.success(
-        f"مرحباً بك {st.session_state['user_name']} "
-        "في منصة إنشاءات للاستشارات الهندسية."
-    )
-
-
-# ==========================================
-# 8. يبدأ هنا محتوى المنصة وأدوات التدقيق
-# ==========================================
-
-# ضع بقية كود المنصة هنا دون وضع st.stop
-# خاص بتسجيل الدخول بعد هذه النقطة.
 
 # إدارة الملفات المرفوعة بأمان في الذاكرة المؤقتة (Session State)
 # ==========================================
@@ -543,10 +242,6 @@ except Exception as e:
 # ==========================================
 # إعدادات واجهة التطبيق
 # ==========================================
-st.set_page_config(
-    page_title="منصة تدقيق نتائج ETABS وتوليد النوتة الحسابية", layout="wide"
-)
-
 def _load_css():
     """يقرأ ملف style.css من نفس مجلد هذا السكربت ويُدرجه في الصفحة.
     محمي بـ try/except عمداً: إن غاب الملف أو تعذّرت قراءته لأي سبب (مسار
