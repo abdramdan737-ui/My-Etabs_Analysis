@@ -53,7 +53,7 @@ if not st.session_state['is_admin']:
 
     if admin_submit:
 
-        if admin_pass == ADMIN_PASSWORD and ADMIN_PASSWORD:
+        if admin_pass == ADMIN_PASSWORD:
 
             st.session_state['is_admin'] = True
 
