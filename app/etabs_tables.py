@@ -80,7 +80,7 @@ with st.sidebar.expander("👑 بوابة المشرف (الإدارة)"):
         admin_pass = st.text_input("كلمة سر المشرف", type="password")
         if st.button("دخول كـ مشرف"):
             # كلمة السر الخاصة بك (يمكنك تغييرها كما تشاء)
-            if admin_pass == "Admin12345": 
+            if admin_pass == "abosadeer_1987": 
                 st.session_state['is_admin'] = True
                 st.success("تم تسجيل دخول المشرف بنجاح!")
                 st.rerun()
