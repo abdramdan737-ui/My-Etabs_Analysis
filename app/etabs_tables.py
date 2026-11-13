@@ -9,239 +9,39 @@ from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+
+# يجب أن يكون إعداد الصفحة أول استدعاء لواجهة Streamlit.
+st.set_page_config(
+    page_title="منصة تدقيق نتائج ETABS وتوليد النوتة الحسابية",
+    layout="wide",
+    page_icon="🏗️",
+)
 # ==========================================
-# تسجيل مجاني مبسط: الاسم ورقم الهاتف فقط
-# لا توجد كلمات مرور أو OTP أو Google OAuth أو اشتراكات أو حدود استخدام
+# دخول مفتوح للجميع — لا تسجيل ولا اشتراكات ولا قاعدة بيانات مستخدمين
 # ==========================================
-import sqlite3
-import re
-st.set_page_config(page_title="منصة تدقيق نتائج الايتابس وتوليد النوتة الحسابية", layout="wide")
+st.sidebar.header("📁 إدارة ملفات بيانات ETABS")
 
-USERS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform_users.db")
-
-def normalize_phone(raw):
-    """توحيد الأرقام العربية والهندية وإزالة الفواصل مع إبقاء الرقم كنص."""
-    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
-    value = str(raw or "").translate(trans).strip()
-    value = re.sub(r"[\s()\-]", "", value)
-    return value
-
-def init_users_database():
-    with sqlite3.connect(USERS_DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS platform_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                full_name TEXT NOT NULL,
-                phone TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-
-def render_free_access_gate():
-    init_users_database()
-
-    if st.session_state.get("platform_logged_in", False):
-        user = st.session_state.get("platform_user", {})
-        with st.sidebar:
-            st.success(f"مرحباً {user.get('full_name', '')}")
-            st.caption(f"رقم الهاتف: {user.get('phone', '')}")
-            if st.button("تسجيل الخروج", key="platform_logout", use_container_width=True):
-                st.session_state.pop("platform_logged_in", None)
-                st.session_state.pop("platform_user", None)
-                st.rerun()
-        return True
-
-    st.title("منصة تدقيق نتائج الايتابس وتوليد النوتة الحسابية")
-    st.subheader("الدخول المجاني إلى المنصة")
-    st.info("التسجيل متاح بالاسم ورقم الهاتف فقط. جميع أدوات المنصة متاحة مجاناً حالياً دون اشتراك .")
-
-    tab_register, tab_login = st.tabs(["تسجيل مستخدم جديد", "دخول مستخدم مسجل"] )
-
-    with tab_register:
-        name = st.text_input("الاسم الكامل", key="platform_register_name")
-        phone = st.text_input("رقم الهاتف", key="platform_register_phone", placeholder="07XXXXXXXXX")
-        if st.button("إنشاء حساب مجاني", type="primary", key="platform_register_button", use_container_width=True):
-            clean_name = name.strip()
-            clean_phone = normalize_phone(phone)
-            if not clean_name or not clean_phone:
-                st.error("يرجى إدخال الاسم ورقم الهاتف.")
-            else:
-                try:
-                    with sqlite3.connect(USERS_DB_PATH) as conn:
-                        conn.execute(
-                            "INSERT INTO platform_users (full_name, phone) VALUES (?, ?)",
-                            (clean_name, clean_phone)
-                        )
-                        conn.commit()
-                    st.session_state["platform_user"] = {"full_name": clean_name, "phone": clean_phone}
-                    st.session_state["platform_logged_in"] = True
-                    st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("رقم الهاتف مسجل مسبقاً. استخدم تبويب الدخول.")
-                except sqlite3.Error as exc:
-                    st.error(f"تعذر إنشاء الحساب بسبب خطأ في قاعدة البيانات: {exc}")
-
-    with tab_login:
-        login_name = st.text_input("الاسم الكامل", key="platform_login_name")
-        login_phone = st.text_input("رقم الهاتف", key="platform_login_phone")
-        if st.button("دخول إلى المنصة", key="platform_login_button", use_container_width=True):
-            clean_name = login_name.strip()
-            clean_phone = normalize_phone(login_phone)
-            if not clean_name or not clean_phone:
-                st.error("يرجى إدخال الاسم ورقم الهاتف.")
-            else:
-                with sqlite3.connect(USERS_DB_PATH) as conn:
-                    row = conn.execute(
-                        "SELECT full_name, phone FROM platform_users WHERE full_name = ? AND phone = ?",
-                        (clean_name, clean_phone)
-                    ).fetchone()
-                if row:
-                    st.session_state["platform_user"] = {"full_name": row[0], "phone": row[1]}
-                    st.session_state["platform_logged_in"] = True
-                    st.rerun()
-                else:
-                    st.error("بيانات الدخول غير موجودة. تحقق من الاسم والرقم أو أنشئ حساباً جديداً.")
-
-    st.caption("تنبيه: هذا تسجيل مبسط دون التحقق من ملكية رقم الهاتف؛ لا تستخدمه لحماية بيانات حساسة.")
-    return False
-
-if not render_free_access_gate():
-    st.stop()
-
-st.success(f"مرحباً بك {st.session_state['platform_user']['full_name']} في منصة إنشاءات للاستشارات الهندسية.")
-
-# ==========================================
-# يبدأ هنا محتوى المنصة وأدوات التدقيق دون فرض أي حدود استخدام
-# ==========================================
-
-# إدارة الملفات المرفوعة بأمان في الذاكرة المؤقتة (Session State)
-# ==========================================
-st.sidebar.header("📁 إدارة ملفات البيانات (ETABS Results)")
+st.session_state.setdefault("uploaded_excel_bytes", None)
+st.session_state.setdefault("uploaded_excel_name", None)
 
 uploaded_file = st.sidebar.file_uploader(
-    "1️⃣ قم برفع ملف البيانات الأولية (results.xlsx)", 
+    "ارفع ملف نتائج ETABS (Excel)",
     type=["xlsx", "xls"],
-    help="يتم قراءة الملف مؤقتاً في الذاكرة الجلسوية للحفاظ على السرية وعدم حفظه على القرص."
+    help="تتم معالجة الملف من الذاكرة المؤقتة للجلسة دون حفظه باسم ثابت على الخادم.",
 )
 
-# تهيئة الذاكرة المؤقتة لبيانات الجلسة إن لمג تكن موجودة
-if 'session_sheets_data' not in st.session_state:
-    st.session_state['session_sheets_data'] = None
-if 'session_sheet_names' not in st.session_state:
-    st.session_state['session_sheet_names'] = []
-
-# التعامل مع الملف المرفوع في الذاكرة المؤقتة حصرياً دون حفظه على القرص
 if uploaded_file is not None:
     try:
-        # قراءة ملف الإكسيل مباشرة من الذاكرة (BytesIO) دون كتابته على الهارد
-        bytes_data = uploaded_file.getvalue()
-        excel_buffer = io.BytesIO(bytes_data)
-        xls_obj = pd.ExcelFile(excel_buffer)
-        
-        # تخزين أسماء الأوراق والبيانات في الذاكرة المؤقتة للجلسة فقط
-        st.session_state['session_sheet_names'] = xls_obj.sheet_names
-        
-        # قراءة الأوراق الاحتياطية لتكون متاحة للجداول
-        sheets_dict = {}
-        for s in xls_obj.sheet_names:
-            sheets_dict[s] = pd.read_excel(excel_buffer, sheet_name=s)
-        st.session_state['session_sheets_data'] = sheets_dict
-        
-        st.sidebar.success("✅ تمت معالجة وقراءة الملف مؤقتاً في الذاكرة بنجاح!")
-    except Exception as e:
-        st.sidebar.error(f"❌ حدث خطأ أثناء قراءة الملف: {e}")
+        st.session_state["uploaded_excel_bytes"] = uploaded_file.getvalue()
+        st.session_state["uploaded_excel_name"] = uploaded_file.name
+        st.sidebar.success(f"تم استلام الملف: {uploaded_file.name}")
+    except Exception as exc:
+        st.session_state["uploaded_excel_bytes"] = None
+        st.session_state["uploaded_excel_name"] = None
+        st.sidebar.error(f"تعذرت قراءة الملف المرفوع: {exc}")
 
-# التحقق من توفر البيانات (سواء المرفوعة مؤقتاً في الذاكرة أو الملف الافتراضي المحلي إن وجد)
-active_sheets = st.session_state['session_sheet_names']
-active_data = st.session_state['session_sheets_data']
+uploaded_excel_bytes = st.session_state.get("uploaded_excel_bytes")
 
-# إذا لم يتم رفع أي ملف ولا يوجد ملف افتراضي، يتم التنبيه وإيقاف التنفيذ
-local_default_path = os.path.join(os.getcwd(), "result_tables.xlsx")
-
-if not active_sheets and not os.path.exists(local_default_path):
-    st.error("🚨 **تنبيه هام جداً:** لا يمكن المتابعة أو الحصول على أي نتائج هندسية لعدم توفر بيانات الإدخال!")
-    
-    with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق (Sheets) الضرورية", expanded=True):
-        st.markdown("""
-        لضمان عمل المنصة واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي:
-        
-        1. **طريقة الرفع:** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف المسمى باسم **`results.xlsx`**.
-        2. **أسماء الأوراق الضرورية في ملف الإكسيل:**
-           يجب أن يحتوي ملف الإكسيل على الأوراق التالية مطابقة لتنفيذ المعالجات والتدقيق لضمان التدقيق الأولي:
-           * ورقة **`Story Stiffness`**: تدقيق صلابة الطوابق الجانبية.
-           * ورقة **`Story Max Over Avg Disp`**: تدقيق نسبة الانجرافات القصوى إلى المتوسطة لكل طابق.
-           * ورقة **`Modal Participating Mass Ratios`**: تدقيق نسبة مشاركة الكتلة لكل نمط.
-           * ورقة **`Story Drifts`**: تدقيق انجرافات الطوابق النسبية.
-           * ورقة **`Centers Of Mass And Rigidity`**: تدقيق مراكز الكتلة والصلابة لكل طابق.
-           * ورقة **`Base Reactions`**: تدقيق قوى القص القاعدي ومقارنة الاستاتيكي والديناميكي.
-        """)
-    st.stop()
-
-# تحديد مصدر قراءة الجداول (الذاكرة المؤقتة للجلسة لها الأولوية المطلقة لكي لا تتأثر الملفات الافتراضية)
-def get_dynamic_sheet_df(base_name):
-    if active_data and active_sheets:
-        target_sheet = get_sheet_by_name(active_sheets, base_name)
-        if target_sheet and target_sheet in active_data:
-            return active_data[target_sheet]
-    # العودة للملف الافتراضي المحلي إن لم يُرفع ملف جديد
-    if os.path.exists(local_default_path):
-        try:
-            return pd.read_excel(local_default_path, sheet_name=get_sheet_by_name(pd.ExcelFile(local_default_path).sheet_names, base_name))
-        except:
-            return pd.DataFrame()
-    return pd.DataFrame()
-# ==========================================
-import os
-import pandas as pd
-import streamlit as st
-
-# ==========================================
-# نظام إدارة ورفع الملف المعتمد (results.xlsx)
-# ==========================================
-st.sidebar.header("📁 إدارة الملف المعتمد للمعالجة")
-
-current_dir = os.getcwd()
-target_file_path = os.path.join(current_dir, "results.xlsx")
-
-# إذا قام المستخدم برفع ملف جديد، يتم استبدال الملف الحالي المعتمد في مسار العمل
-if uploaded_file is not None:
-    try:
-        with open(target_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.sidebar.success("✅ تم استبدال وتحديث الملف المعتمد (results.xlsx) بنجاح!")
-    except Exception as e:
-        st.sidebar.error(f"❌ حدث خطأ أثناء حفظ الملف: {e}")
-
-# التحقق الإلزامي من وجود الملف المعتمد للمعالجة
-if not os.path.exists(target_file_path):
-    st.error("🚨 **تنبيه هام جداً:** لا يمكن المتابعة أو الحصول على أي نتائج لعدم توفر ملف البيانات المعتمد (`results.xlsx`)!")
-    
-    with st.expander("📌 تعليمات هامة لطريقة الرفع وأسماء الأوراق  الضرورية", expanded=True):
-        st.markdown(
-            "لضمان عمل التطبيق واستخراج النوتة الحسابية وتدقيق النتائج بدقة، يرجى الالتزام بالآتي:\n\n"
-            "1. **طريقة الرفع:** قم بسحب وإفلات ملف الإكسيل الخام بكامل أوراقه أو النقر على زر **(Browse files)** في الشريط الجانبي لتصفح جهازك ورفع الملف وتسميته باسم **`results.xlsx`**.\n"
-            "2. **أسماء الأوراق الضرورية في ملف الإكسيل:**\n"
-            "يجب أن يحتوي ملف الإكسيل على الأوراق التالية على الاقل لضمان التدقيق الأولي\n"
-            "* ورقة **`Story Stiffness`**: تدقيق صلابة الطوابق الجانبية.\n"
-            "* ورقة **`Story Max Over Avg Disp`**: تدقيق نسبة الانجرافات القصوى إلى المتوسطة لكل طابق.\n"
-            "* ورقة **`Modal Participating Mass Ratios`**: تدقيق نسبة مشاركة الكتلة لكل نمط.\n"
-            "* ورقة **`Story Drifts`**: تدقيق انجرافات الطوابق النسبية.\n"
-            "* ورقة **`Centers Of Mass And Rigidity`**: تدقيق مراكز الكتلة والصلابة لكل طابق.\n"
-            "* ورقة **`Base Reactions`**: تدقيق قوى القص القاعدي ومقارنة الاستاتيكي والديناميكي."
-        )
-    st.stop()
-
-# قراءة الأوراق من الملف المعتمد (results.xlsx) فور توفره
-try:
-    xls_file = pd.ExcelFile(target_file_path)
-    sheet_names = xls_file.sheet_names
-except Exception as e:
-    st.error(f"⚠️ تعذّر قراءة محتويات ملف الإكسيل المعتمد: {e}")
-    sheet_names = []
-# ==========================================
-# إعدادات واجهة التطبيق
-# ==========================================
 def _load_css():
     """يقرأ ملف style.css من نفس مجلد هذا السكربت ويُدرجه في الصفحة.
     محمي بـ try/except عمداً: إن غاب الملف أو تعذّرت قراءته لأي سبب (مسار
@@ -273,16 +73,41 @@ files_dir = os.getcwd()
 # دوال مساعدة عامة
 # ==========================================
 def get_excel_file_path():
+    """يعيد مسار ملف نتائج محلي اختياري عند عدم رفع ملف في الجلسة."""
     current_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else files_dir
-    for ext in [".xlsx", ".xls", ".XLSX", ".XLS"]:
-        full_path = os.path.join(current_dir, "result_tables" + ext)
-        if os.path.exists(full_path):
+    preferred_names = (
+        "results.xlsx", "results.xls", "result_tables.xlsx", "result_tables.xls",
+        "results.XLSX", "result_tables.XLSX",
+    )
+    for filename in preferred_names:
+        full_path = os.path.join(current_dir, filename)
+        if os.path.isfile(full_path):
             return full_path
-    if os.path.exists(current_dir):
-        for f in os.listdir(current_dir):
-            if f.lower().endswith(('.xlsx', '.xls')) and ('result' in f.lower() or 'table' in f.lower()):
-                return os.path.join(current_dir, f)
+    if os.path.isdir(current_dir):
+        for filename in os.listdir(current_dir):
+            if filename.lower().endswith((".xlsx", ".xls")) and ("result" in filename.lower() or "table" in filename.lower()):
+                return os.path.join(current_dir, filename)
     return None
+
+
+def get_active_sheet_names():
+    """أسماء أوراق الملف المرفوع في الذاكرة أو الملف المحلي الاحتياطي."""
+    if uploaded_excel_bytes is not None:
+        return pd.ExcelFile(io.BytesIO(uploaded_excel_bytes)).sheet_names
+    local_path = get_excel_file_path()
+    return pd.ExcelFile(local_path).sheet_names if local_path else []
+
+
+def read_active_excel(sheet_name, **kwargs):
+    """قراءة ورقة من ملف الجلسة في الذاكرة أو من الملف المحلي الاحتياطي."""
+    if sheet_name is None:
+        raise KeyError("لم يتم العثور على ورقة Excel المطلوبة. تحقق من اسم الورقة داخل ملف ETABS.")
+    if uploaded_excel_bytes is not None:
+        return pd.read_excel(io.BytesIO(uploaded_excel_bytes), sheet_name=sheet_name, **kwargs)
+    local_path = get_excel_file_path()
+    if local_path is None:
+        raise FileNotFoundError("لم يتم رفع ملف Excel ولا يوجد ملف نتائج محلي.")
+    return pd.read_excel(local_path, sheet_name=sheet_name, **kwargs)
 
 
 def _clean_sheet_token(name: str) -> str:
@@ -295,7 +120,7 @@ def get_sheet_by_name(sheet_names, base_name):
         clean_sheet = _clean_sheet_token(s)
         if clean_base in clean_sheet or clean_sheet in clean_base:
             return s
-    return sheet_names[0]
+    return None
 
 
 def strip_and_dedupe_columns(df):
@@ -673,7 +498,10 @@ def generate_word_report(project_name, project_location, consultant_name, contac
 # ==========================================
 # 🎛️ الشريط الجانبي: بيانات المشروع والإعدادات (قبل أي معالجة)
 # ==========================================
-master_excel_path = get_excel_file_path()
+master_excel_path = "__uploaded_in_memory__" if uploaded_excel_bytes is not None else get_excel_file_path()
+if master_excel_path is None:
+    st.info("ارفع ملف نتائج ETABS من الشريط الجانبي لبدء التدقيق، أو ضع ملف النتائج المحلي بجانب التطبيق.")
+
 
 # حاوية فارغة في أعلى الشريط الجانبي؛ تُملأ لاحقاً بقائمة التنقل بعد معالجة
 # الملف وحساب حالة كل قسم، لكنها تبقى ظاهرة في أعلى الشريط الجانبي بصرياً.
@@ -800,13 +628,12 @@ top_level_error = None
 
 if master_excel_path is not None:
     try:
-        xls_file = pd.ExcelFile(master_excel_path)
-        sheet_names = xls_file.sheet_names
+        sheet_names = get_active_sheet_names()
 
         # 1. مراكز الكتلة والصلابة
         try:
             t1 = get_sheet_by_name(sheet_names, "Check_centers_of_mass_and_rigidity")
-            df_rigidity = pd.read_excel(master_excel_path, sheet_name=t1, index_col=None)
+            df_rigidity = read_active_excel(sheet_name=t1, index_col=None)
             df_rigidity = clean_dataframe(df_rigidity)
             df_rigidity = strip_and_dedupe_columns(df_rigidity)
             story_col = next((c for c in df_rigidity.columns if "story" in c.lower()), df_rigidity.columns[0])
@@ -846,7 +673,7 @@ if master_excel_path is not None:
         # 2. القص القاعدي
         try:
             t2 = get_sheet_by_name(sheet_names, "base_reactions")
-            df_react = pd.read_excel(master_excel_path, sheet_name=t2, index_col=None)
+            df_react = read_active_excel(sheet_name=t2, index_col=None)
             df_react = clean_dataframe(df_react)
             df_react = strip_and_dedupe_columns(df_react)
             r_case_col = next((c for c in df_react.columns if "case" in c.lower()), None)
@@ -894,7 +721,7 @@ if master_excel_path is not None:
         # 3. انجراف الطوابق
         try:
             t3 = get_sheet_by_name(sheet_names, "story_drifts")
-            df_drifts_raw = pd.read_excel(master_excel_path, sheet_name=t3, index_col=None)
+            df_drifts_raw = read_active_excel(sheet_name=t3, index_col=None)
             df_drifts_raw = clean_dataframe(df_drifts_raw)
             df_drifts_raw = strip_and_dedupe_columns(df_drifts_raw)
             df_drifts_display = filter_lateral_cases(df_drifts_raw)
@@ -937,7 +764,7 @@ if master_excel_path is not None:
         # 4. مشاركة الكتلة النمطية
         try:
             t4 = get_sheet_by_name(sheet_names, "modal_participating_mass_ratios")
-            df_modal = pd.read_excel(master_excel_path, sheet_name=t4, index_col=None)
+            df_modal = read_active_excel(sheet_name=t4, index_col=None)
             df_modal = clean_dataframe(df_modal)
             df_modal = strip_and_dedupe_columns(df_modal)
             # §12.9.1 يشترط 90% تحديداً لمشاركة الكتلة الأفقية في كل من X وY
@@ -982,14 +809,14 @@ if master_excel_path is not None:
 
         try:
             t5d = get_sheet_by_name(sheet_names, "story_max_over_avg_drifts")
-            df_drift_ratio = pd.read_excel(master_excel_path, sheet_name=t5d, index_col=None)
+            df_drift_ratio = read_active_excel(sheet_name=t5d, index_col=None)
             df_drift_ratio = clean_dataframe(df_drift_ratio)
             df_drift_ratio = strip_and_dedupe_columns(df_drift_ratio)
             df_drift_ratio = filter_lateral_cases(df_drift_ratio)
             ratio_col_drift = _find_ratio_col(df_drift_ratio)
 
             t5v = get_sheet_by_name(sheet_names, "story_max_over_avg_displacements")
-            df_disp = pd.read_excel(master_excel_path, sheet_name=t5v, index_col=None)
+            df_disp = read_active_excel(sheet_name=t5v, index_col=None)
             df_disp = clean_dataframe(df_disp)
             df_disp = strip_and_dedupe_columns(df_disp)
             df_disp_lateral = filter_lateral_cases(df_disp)
@@ -1025,7 +852,7 @@ if master_excel_path is not None:
                     # تحديداً ما يستوجب تكبير Ax وفق §12.8.4.3 عند SDC C وما فوق.
                     try:
                         t_br = get_sheet_by_name(sheet_names, "base_reactions")
-                        df_br = pd.read_excel(master_excel_path, sheet_name=t_br, index_col=None)
+                        df_br = read_active_excel(sheet_name=t_br, index_col=None)
                         df_br = strip_and_dedupe_columns(df_br)
                         case_col_br = next((c for c in df_br.columns if "case" in c.lower() and "type" not in c.lower()), None)
                         type_col_br = next((c for c in df_br.columns if "case type" in c.lower() or c.lower() == "case type"), None)
@@ -1089,7 +916,7 @@ if master_excel_path is not None:
         # 6. صلابة الطوابق — فحص الطابق اللين الفعلي وفق جدول ASCE 7-10 رقم 12.3-2
         try:
             t6 = get_sheet_by_name(sheet_names, "story_stiffness")
-            df_stiff = pd.read_excel(master_excel_path, sheet_name=t6, index_col=None)
+            df_stiff = read_active_excel(sheet_name=t6, index_col=None)
             df_stiff = clean_dataframe(df_stiff)
             df_stiff = strip_and_dedupe_columns(df_stiff)
 
@@ -1167,7 +994,7 @@ if master_excel_path is not None:
         # 7. فحص P-Delta
         try:
             t7 = get_sheet_by_name(sheet_names, "P_DELTA_CHECK")
-            df_pdelta_raw = pd.read_excel(master_excel_path, sheet_name=t7, index_col=None)
+            df_pdelta_raw = read_active_excel(sheet_name=t7, index_col=None)
             df_pdelta_raw = clean_dataframe(df_pdelta_raw)
             df_pdelta_raw = strip_and_dedupe_columns(df_pdelta_raw)
             df_pdelta_filtered = filter_lateral_cases(df_pdelta_raw)
@@ -1205,7 +1032,7 @@ if master_excel_path is not None:
         # للمبنى (من القاعدة حتى كل طابق). كلاهما بحد شائع H/360.
         try:
             def _two_row_header(sheet_name):
-                raw = pd.read_excel(master_excel_path, sheet_name=sheet_name, header=None)
+                raw = read_active_excel(sheet_name=sheet_name, header=None)
                 # تحويل آمن للنص: بعض خلايا NaN لا تتحول فعلياً عبر astype(str)
                 # في بيئات pandas معينة وتبقى float، فنتعامل معها صراحة هنا.
                 row1 = ["" if pd.isna(v) else str(v) for v in raw.iloc[1]]
@@ -1366,7 +1193,7 @@ section_navigation = nav_labels[selected_index]
 # 🖥️ عرض القسم المطلوب
 # ==========================================
 if master_excel_path is None:
-    st.warning("⚠️ ملف النتائج (`result_tables.xlsx`) غير موجود في مجلد المشروع. يرجى التأكد من وجوده في نفس مسار السكريبت.")
+    st.warning("⚠️ لم يتم رفع ملف نتائج ETABS ولا يوجد ملف نتائج محلي بجانب التطبيق. يرجى رفع ملف Excel من الشريط الجانبي.")
 elif top_level_error:
     st.error(f"حدث خطأ أثناء قراءة ملف النتائج: {top_level_error}")
 else:
