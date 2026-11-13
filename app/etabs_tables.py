@@ -15,7 +15,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 # ==========================================
 import sqlite3
 import re
-st.set_page_config(page_title="منصة تدقيق نتائج ETABS وتوليد النوتة الحسابية", layout="wide")
+st.set_page_config(page_title="منصة تدقيق نتائج الايتابس وتوليد النوتة الحسابية", layout="wide")
 
 USERS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform_users.db")
 
@@ -52,7 +52,7 @@ def render_free_access_gate():
                 st.rerun()
         return True
 
-    st.title("منصة إنشاءات للاستشارات الهندسية")
+    st.title("منصة تدقيق نتائج الايتابس وتوليد النوتة الحسابية")
     st.subheader("الدخول المجاني إلى المنصة")
     st.info("التسجيل متاح بالاسم ورقم الهاتف فقط. جميع أدوات المنصة متاحة مجاناً حالياً دون اشتراك أو حد لعدد مرات الاستخدام.")
 
